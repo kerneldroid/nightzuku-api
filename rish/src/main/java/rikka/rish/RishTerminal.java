@@ -35,8 +35,8 @@ public class RishTerminal {
     private FileDescriptor[] stdin;
     private FileDescriptor[] stdout;
     private FileDescriptor[] stderr;
-    private int ttyFd = -1;
-    private int exitCode;
+    private volatile int ttyFd = -1;
+    private volatile int exitCode;
 
     public RishTerminal(String[] argv) throws ErrnoException, RemoteException {
         this.argv = argv;
@@ -87,10 +87,10 @@ public class RishTerminal {
     public void start() {
         Log.d(TAG, "start");
 
-        ttyFd = start(tty, getFd(stdin, 1), getFd(stdout, 0), getFd(stdout, 0));
+        ttyFd = start(tty, getFd(stdin, 1), getFd(stdout, 0), getFd(stderr, 0));
 
         if (ttyFd != -1) {
-            new Thread(() -> {
+            Thread winThread = new Thread(() -> {
                 while (true) {
                     Log.d(TAG, "waitForWindowSizeChange");
 
@@ -99,9 +99,12 @@ public class RishTerminal {
                         setWindowSize(size);
                     } catch (Throwable e) {
                         Log.w(TAG, Log.getStackTraceString(e));
+                        break;
                     }
                 }
-            }).start();
+            }, "rish-winch");
+            winThread.setDaemon(true);
+            winThread.start();
         }
     }
 
@@ -114,7 +117,7 @@ public class RishTerminal {
         try {
             data.writeInterfaceToken(RishConfig.getInterfaceToken());
             data.writeLong(size);
-            RishConfig.getBinder().transact(RishConfig.getTransactionCode(RishConfig.TRANSACTION_setWindowSize), data, null, 0);
+            RishConfig.getBinder().transact(RishConfig.getTransactionCode(RishConfig.TRANSACTION_setWindowSize), data, reply, 0);
             reply.readException();
         } finally {
             data.recycle();
@@ -130,7 +133,7 @@ public class RishTerminal {
 
         try {
             data.writeInterfaceToken(RishConfig.getInterfaceToken());
-            RishConfig.getBinder().transact(RishConfig.getTransactionCode(RishConfig.TRANSACTION_getExitCode), data, null, 0);
+            RishConfig.getBinder().transact(RishConfig.getTransactionCode(RishConfig.TRANSACTION_getExitCode), data, reply, 0);
             reply.readException();
             return reply.readInt();
         } finally {
@@ -148,6 +151,10 @@ public class RishTerminal {
         } catch (Throwable e) {
             Log.w(TAG, Log.getStackTraceString(e));
             exitCode = -1;
+        } finally {
+            closeFd(stdin, 1);
+            closeFd(stdout, 0);
+            closeFd(stderr, 0);
         }
         return exitCode;
     }

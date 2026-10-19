@@ -2,10 +2,8 @@ package rikka.shizuku;
 
 import androidx.annotation.NonNull;
 
-import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashMap;
-import java.util.List;
 import java.util.Map;
 
 class ShizukuServiceConnections {
@@ -15,24 +13,19 @@ class ShizukuServiceConnections {
     @NonNull
     static ShizukuServiceConnection get(Shizuku.UserServiceArgs args) {
         String key = args.tag != null ? args.tag : args.componentName.getClassName();
-        ShizukuServiceConnection connection = CACHE.get(key);
-
-        if (connection == null) {
-            connection = new ShizukuServiceConnection(args);
-            CACHE.put(key, connection);
+        synchronized (CACHE) {
+            ShizukuServiceConnection connection = CACHE.get(key);
+            if (connection == null) {
+                connection = new ShizukuServiceConnection(args);
+                CACHE.put(key, connection);
+            }
+            return connection;
         }
-        return connection;
     }
 
     static void remove(ShizukuServiceConnection connection) {
-        List<String> keys = new ArrayList<>();
-        for (Map.Entry<String, ShizukuServiceConnection> entry : CACHE.entrySet()) {
-            if (entry.getValue() == connection) {
-                keys.add(entry.getKey());
-            }
-        }
-        for (String key : keys) {
-            CACHE.remove(key);
+        synchronized (CACHE) {
+            CACHE.values().removeIf(val -> val == connection);
         }
     }
 }

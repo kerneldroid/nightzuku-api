@@ -16,15 +16,18 @@ public class RemoteProcessHolder extends IRemoteProcess.Stub {
     private static final Logger LOGGER = new Logger("RemoteProcessHolder");
 
     private final Process process;
+    private final IBinder token;
+    private IBinder.DeathRecipient deathRecipient;
     private ParcelFileDescriptor in;
     private ParcelFileDescriptor out;
 
     public RemoteProcessHolder(Process process, IBinder token) {
         this.process = process;
+        this.token = token;
 
         if (token != null) {
             try {
-                DeathRecipient deathRecipient = () -> {
+                this.deathRecipient = () -> {
                     try {
                         if (alive()) {
                             destroy();
@@ -34,15 +37,25 @@ public class RemoteProcessHolder extends IRemoteProcess.Stub {
                         LOGGER.w(e, "failed to destroy process");
                     }
                 };
-                token.linkToDeath(deathRecipient, 0);
+                token.linkToDeath(this.deathRecipient, 0);
             } catch (Throwable e) {
                 LOGGER.w(e, "linkToDeath");
             }
         }
     }
 
+    private synchronized void unlinkTokenToDeath() {
+        if (token != null && deathRecipient != null) {
+            try {
+                token.unlinkToDeath(deathRecipient, 0);
+            } catch (Throwable ignored) {
+            }
+            deathRecipient = null;
+        }
+    }
+
     @Override
-    public ParcelFileDescriptor getOutputStream() {
+    public synchronized ParcelFileDescriptor getOutputStream() {
         if (out == null) {
             try {
                 out = ParcelFileDescriptorUtil.pipeTo(process.getOutputStream());
@@ -54,7 +67,7 @@ public class RemoteProcessHolder extends IRemoteProcess.Stub {
     }
 
     @Override
-    public ParcelFileDescriptor getInputStream() {
+    public synchronized ParcelFileDescriptor getInputStream() {
         if (in == null) {
             try {
                 in = ParcelFileDescriptorUtil.pipeFrom(process.getInputStream());
@@ -79,18 +92,27 @@ public class RemoteProcessHolder extends IRemoteProcess.Stub {
         try {
             return process.waitFor();
         } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
             throw new IllegalStateException(e);
+        } finally {
+            unlinkTokenToDeath();
         }
     }
 
     @Override
     public int exitValue() {
-        return process.exitValue();
+        int code = process.exitValue();
+        unlinkTokenToDeath();
+        return code;
     }
 
     @Override
     public void destroy() {
-        process.destroy();
+        try {
+            process.destroy();
+        } finally {
+            unlinkTokenToDeath();
+        }
     }
 
     @Override
@@ -119,6 +141,7 @@ public class RemoteProcessHolder extends IRemoteProcess.Stub {
                         Thread.sleep(
                                 Math.min(TimeUnit.NANOSECONDS.toMillis(rem) + 1, 100));
                     } catch (InterruptedException e) {
+                        Thread.currentThread().interrupt();
                         throw new IllegalStateException();
                     }
                 }

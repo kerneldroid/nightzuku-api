@@ -153,15 +153,18 @@ public abstract class Service<
         LOGGER.d("transact: uid=%d, descriptor=%s, code=%d", Binder.getCallingUid(), targetBinder.getInterfaceDescriptor(), targetCode);
         Parcel newData = Parcel.obtain();
         try {
-            newData.appendFrom(data, data.dataPosition(), data.dataAvail());
-        } catch (Throwable tr) {
-            LOGGER.w(tr, "appendFrom");
-            return;
-        }
-        try {
+            try {
+                newData.appendFrom(data, data.dataPosition(), data.dataAvail());
+            } catch (Throwable tr) {
+                LOGGER.w(tr, "appendFrom");
+                return;
+            }
             long id = Binder.clearCallingIdentity();
-            targetBinder.transact(targetCode, newData, reply, targetFlags);
-            Binder.restoreCallingIdentity(id);
+            try {
+                targetBinder.transact(targetCode, newData, reply, targetFlags);
+            } finally {
+                Binder.restoreCallingIdentity(id);
+            }
         } finally {
             newData.recycle();
         }
