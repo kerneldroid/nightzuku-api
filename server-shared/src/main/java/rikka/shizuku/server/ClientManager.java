@@ -12,7 +12,7 @@ import rikka.shizuku.server.util.Logger;
 
 public class ClientManager<ConfigMgr extends ConfigManager> {
 
-    protected static final Logger LOGGER = new Logger("UserServiceRecord");
+    protected static final Logger LOGGER = new Logger("ClientManager");
 
     private final ConfigMgr configManager;
     private final List<ClientRecord> clientRecords = Collections.synchronizedList(new ArrayList<>());
@@ -26,7 +26,7 @@ public class ClientManager<ConfigMgr extends ConfigManager> {
     }
 
     public List<ClientRecord> findClients(int uid) {
-        synchronized (this) {
+        synchronized (clientRecords) {
             List<ClientRecord> res = new ArrayList<>();
             for (ClientRecord clientRecord : clientRecords) {
                 if (clientRecord.uid == uid) {
@@ -38,9 +38,11 @@ public class ClientManager<ConfigMgr extends ConfigManager> {
     }
 
     public ClientRecord findClient(int uid, int pid) {
-        for (ClientRecord clientRecord : clientRecords) {
-            if (clientRecord.pid == pid && clientRecord.uid == uid) {
-                return clientRecord;
+        synchronized (clientRecords) {
+            for (ClientRecord clientRecord : clientRecords) {
+                if (clientRecord.pid == pid && clientRecord.uid == uid) {
+                    return clientRecord;
+                }
             }
         }
         return null;
@@ -83,5 +85,3 @@ public class ClientManager<ConfigMgr extends ConfigManager> {
         return clientRecord;
     }
 }
-
-

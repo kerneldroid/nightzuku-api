@@ -10,6 +10,7 @@ import android.util.Log;
 import androidx.annotation.NonNull;
 import androidx.annotation.Nullable;
 
+import java.util.Collections;
 import java.util.HashMap;
 import java.util.Map;
 
@@ -17,7 +18,7 @@ public abstract class RishService {
 
     private static final String TAG = "RishService";
 
-    private static final Map<Integer, RishHost> HOSTS = new HashMap<>();
+    private static final Map<Integer, RishHost> HOSTS = Collections.synchronizedMap(new HashMap<>());
 
     private static final boolean IS_ROOT = Os.getuid() == 0;
 
@@ -30,18 +31,19 @@ public abstract class RishService {
 
         // Termux app set PATH and LD_PRELOAD to Termux's internal path.
         // Adb does not have sufficient permissions to access such places.
-
         // Under adb, users need to set RISH_PRESERVE_ENV=1 to preserve env.
         // Under root, keep env unless RISH_PRESERVE_ENV=0 is set.
 
         boolean allowEnv = IS_ROOT;
-        for (String e : env) {
-            if ("RISH_PRESERVE_ENV=1".equals(e)) {
-                allowEnv = true;
-                break;
-            } else if ("RISH_PRESERVE_ENV=0".equals(e)) {
-                allowEnv = false;
-                break;
+        if (env != null) {
+            for (String e : env) {
+                if ("RISH_PRESERVE_ENV=1".equals(e)) {
+                    allowEnv = true;
+                    break;
+                } else if ("RISH_PRESERVE_ENV=0".equals(e)) {
+                    allowEnv = false;
+                    break;
+                }
             }
         }
         if (!allowEnv) {
@@ -135,5 +137,4 @@ public abstract class RishService {
         }
         return false;
     }
-
 }

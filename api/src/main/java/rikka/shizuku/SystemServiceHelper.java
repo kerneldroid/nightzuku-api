@@ -11,15 +11,14 @@ import androidx.annotation.NonNull;
 import java.lang.reflect.Field;
 import java.lang.reflect.InvocationTargetException;
 import java.lang.reflect.Method;
-import java.util.HashMap;
 import java.util.Map;
-import java.util.Objects;
+import java.util.concurrent.ConcurrentHashMap;
 
 @SuppressLint("PrivateApi")
 public class SystemServiceHelper {
 
-    private static final Map<String, IBinder> SYSTEM_SERVICE_CACHE = new HashMap<>();
-    private static final Map<String, Integer> TRANSACT_CODE_CACHE = new HashMap<>();
+    private static final Map<String, IBinder> SYSTEM_SERVICE_CACHE = new ConcurrentHashMap<>();
+    private static final Map<String, Integer> TRANSACT_CODE_CACHE = new ConcurrentHashMap<>();
 
     private static Method getService;
 
@@ -40,13 +39,17 @@ public class SystemServiceHelper {
      */
     public static IBinder getSystemService(@NonNull String name) {
         IBinder binder = SYSTEM_SERVICE_CACHE.get(name);
-        if (binder == null) {
+        if (binder == null || !binder.pingBinder()) {
             try {
                 binder = (IBinder) getService.invoke(null, name);
             } catch (IllegalAccessException | InvocationTargetException e) {
                 Log.w("SystemServiceHelper", Log.getStackTraceString(e));
             }
-            SYSTEM_SERVICE_CACHE.put(name, binder);
+            if (binder != null) {
+                SYSTEM_SERVICE_CACHE.put(name, binder);
+            } else {
+                SYSTEM_SERVICE_CACHE.remove(name);
+            }
         }
         return binder;
     }
@@ -101,13 +104,6 @@ public class SystemServiceHelper {
     }
 
     /**
-     * Obtain a new data parcel for {@link Shizuku#transactRemote(Parcel, Parcel, int)}.
-     *
-     * @param serviceName   system service name
-     * @param interfaceName class name for reflection
-     * @param methodName    method name for reflection
-     * @return data parcel
-     * @throws NullPointerException can't get system service or transaction code
      * @deprecated Use {@link ShizukuBinderWrapper} instead
      */
     @Deprecated
@@ -116,14 +112,6 @@ public class SystemServiceHelper {
     }
 
     /**
-     * Obtain a new data parcel for {@link Shizuku#transactRemote(Parcel, Parcel, int)}.
-     *
-     * @param serviceName   system service name
-     * @param interfaceName interface name
-     * @param className     class name for reflection
-     * @param methodName    method name for reflection
-     * @return data parcel
-     * @throws NullPointerException can't get system service or transaction code
      * @deprecated Use {@link ShizukuBinderWrapper} instead
      */
     @Deprecated

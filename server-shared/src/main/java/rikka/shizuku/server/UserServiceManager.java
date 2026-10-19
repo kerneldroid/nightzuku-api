@@ -22,6 +22,7 @@ import android.util.ArrayMap;
 import java.io.OutputStream;
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
@@ -93,6 +94,19 @@ public abstract class UserServiceManager {
 
     private void removeUserServiceLocked(UserServiceRecord record) {
         if (userServiceRecords.values().remove(record)) {
+            synchronized (packageUserServiceRecords) {
+                Iterator<Map.Entry<String, List<UserServiceRecord>>> it = packageUserServiceRecords.entrySet().iterator();
+                while (it.hasNext()) {
+                    Map.Entry<String, List<UserServiceRecord>> entry = it.next();
+                    List<UserServiceRecord> list = entry.getValue();
+                    if (list != null) {
+                        list.remove(record);
+                        if (list.isEmpty()) {
+                            it.remove();
+                        }
+                    }
+                }
+            }
             record.destroy();
             onUserServiceRecordRemoved(record);
         }
@@ -111,7 +125,7 @@ public abstract class UserServiceManager {
         PackageInfo packageInfo = ensureCallingPackageForUserService(packageName, appId, userId);
 
         String className = Objects.requireNonNull(componentName.getClassName(), "class is null");
-        String sourceDir = Objects.requireNonNull(packageInfo.applicationInfo.sourceDir, "apk path is null");
+        Objects.requireNonNull(packageInfo.applicationInfo.sourceDir, "apk path is null");
 
         int versionCode = options.getInt(USER_SERVICE_ARG_VERSION_CODE, 1);
         String tag = options.getString(USER_SERVICE_ARG_TAG);
@@ -219,16 +233,19 @@ public abstract class UserServiceManager {
 
         String cmd = getUserServiceStartCmd(record, key, token, packageName, classname, processNameSuffix, callingUid, use32Bits && AbiUtil.has32Bit(), debug);
         int exitCode;
+        java.lang.Process process = null;
         try {
-            java.lang.Process process = Runtime.getRuntime().exec("sh");
-            OutputStream os = process.getOutputStream();
-            os.write(cmd.getBytes());
-            os.flush();
-            os.close();
-
+            process = Runtime.getRuntime().exec("sh");
+            try (OutputStream os = process.getOutputStream()) {
+                os.write(cmd.getBytes());
+                os.flush();
+            }
             exitCode = process.waitFor();
         } catch (Throwable e) {
-            throw new IllegalStateException(e.getMessage());
+            if (process != null) {
+                process.destroy();
+            }
+            throw new IllegalStateException(e.getMessage(), e);
         }
         if (exitCode != 0) {
             throw new IllegalStateException("sh exited with " + exitCode);
@@ -276,14 +293,16 @@ public abstract class UserServiceManager {
     }
 
     public void removeUserServicesForPackage(String packageName) {
-        List<UserServiceRecord> list = packageUserServiceRecords.get(packageName);
+        List<UserServiceRecord> list = packageUserServiceRecords.remove(packageName);
         if (list != null) {
-            for (UserServiceRecord record : list) {
+            List<UserServiceRecord> snapshot;
+            synchronized (list) {
+                snapshot = new ArrayList<>(list);
+            }
+            for (UserServiceRecord record : snapshot) {
                 record.removeSelf();
                 LOGGER.i("Remove user service %s for package %s", record.token, packageName);
             }
-            packageUserServiceRecords.remove(packageName);
         }
     }
-
 }

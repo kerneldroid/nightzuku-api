@@ -9,8 +9,8 @@ import android.os.RemoteException;
 
 import androidx.annotation.Nullable;
 
-import java.util.HashSet;
 import java.util.Set;
+import java.util.concurrent.CopyOnWriteArraySet;
 
 import moe.shizuku.server.IShizukuServiceConnection;
 
@@ -18,15 +18,16 @@ class ShizukuServiceConnection extends IShizukuServiceConnection.Stub {
 
     private static final Handler MAIN_HANDLER = new Handler(Looper.getMainLooper());
 
-    private final Set<ServiceConnection> connections = new HashSet<>();
+    private final Set<ServiceConnection> connections = new CopyOnWriteArraySet<>();
     private final ComponentName componentName;
+    private final IBinder.DeathRecipient deathRecipient = this::died;
     private IBinder binder;
 
     public ShizukuServiceConnection(Shizuku.UserServiceArgs args) {
         this.componentName = args.componentName;
     }
 
-    private boolean dead = false;
+    private volatile boolean dead = false;
 
     public void addConnection(@Nullable ServiceConnection conn) {
         if (conn != null) {
@@ -47,37 +48,40 @@ class ShizukuServiceConnection extends IShizukuServiceConnection.Stub {
     @Override
     public void connected(IBinder binder) {
         MAIN_HANDLER.post(() -> {
-                    for (ServiceConnection conn : connections) {
-                        conn.onServiceConnected(componentName, binder);
-                    }
-                }
-        );
+            for (ServiceConnection conn : connections) {
+                conn.onServiceConnected(componentName, binder);
+            }
+        });
 
-        // Hold the binder, or linkToDeath will not work after reference to
-        // the binder is dropped
         this.binder = binder;
 
         try {
-            this.binder.linkToDeath(this::died, 0);
+            this.binder.linkToDeath(deathRecipient, 0);
         } catch (RemoteException ignored) {
         }
     }
 
     @Override
     public void died() {
+        IBinder currentBinder = binder;
         binder = null;
+        if (currentBinder != null) {
+            try {
+                currentBinder.unlinkToDeath(deathRecipient, 0);
+            } catch (Throwable ignored) {
+            }
+        }
 
         if (dead) return;
         dead = true;
 
         MAIN_HANDLER.post(() -> {
-                    for (ServiceConnection conn : connections) {
-                        conn.onServiceDisconnected(componentName);
-                    }
+            for (ServiceConnection conn : connections) {
+                conn.onServiceDisconnected(componentName);
+            }
 
-                    connections.clear();
-                    ShizukuServiceConnections.remove(this);
-                }
-        );
+            connections.clear();
+            ShizukuServiceConnections.remove(this);
+        });
     }
 }
