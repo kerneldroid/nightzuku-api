@@ -4,6 +4,9 @@ plugins {
 
 android {
     namespace 'rikka.rish'
+    buildFeatures {
+        buildConfig = false
+    }
     buildTypes {
         release {
             minifyEnabled false
@@ -17,12 +20,11 @@ android {
 
 dependencies {
     implementation project(':api')
-
-    implementation 'androidx.annotation:annotation:1.3.0'
+    implementation 'androidx.annotation:annotation:1.11.0'
 }
 
 ext {
     publishLibrary = false
-    POM_NAME = "RISH"
-    POM_DESCRIPTION = "RISH"
+    POM_NAME = "Nightzuku API - RISH"
+    POM_DESCRIPTION = "Remote interactive shell bridge for Nightzuku."
 }
