@@ -5,8 +5,8 @@ plugins {
 android {
     namespace 'rikka.shizuku.aidl'
     buildFeatures {
-        buildConfig false
-        aidl true
+        buildConfig = false
+        aidl = true
     }
     buildTypes {
         release {
@@ -14,13 +14,13 @@ android {
         }
     }
     compileOptions {
-        sourceCompatibility JavaVersion.VERSION_11
-        targetCompatibility JavaVersion.VERSION_11
+        sourceCompatibility JavaVersion.VERSION_21
+        targetCompatibility JavaVersion.VERSION_21
     }
 }
 
 ext {
     publishLibrary = true
-    POM_NAME = "Shizuku API - aidl"
-    POM_DESCRIPTION = "Low level aidl of Shizuku and Sui."
+    POM_NAME = "Nightzuku API - AIDL"
+    POM_DESCRIPTION = "Low-level AIDL contracts for Nightzuku and legacy Shizuku compatibility."
 }

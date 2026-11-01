@@ -1,19 +1,28 @@
 apply from: 'manifest.gradle'
 
-allprojects {
-    tasks.withType(Javadoc) {
-        options.addStringOption('Xdoclint:none', '-quiet')
-    }
-}
-
 subprojects {
+    plugins.withId("com.android.base") {
+        android {
+            compileSdk = 37
+            buildToolsVersion = "37.0.0"
+            ndkVersion = "29.0.14206865"
+            defaultConfig {
+                minSdk = 25
+                targetSdk = 37
+            }
+            compileOptions {
+                sourceCompatibility = JavaVersion.VERSION_21
+                targetCompatibility = JavaVersion.VERSION_21
+            }
+        }
+    }
+
     afterEvaluate { project ->
         if (!(it.findProperty('publishLibrary') ?: false)) {
             return
         }
 
         plugins.apply('maven-publish')
-        plugins.apply('signing')
 
         if (project.parent == rootProject) {
             group = "${groupIdBase}"
@@ -21,7 +30,6 @@ subprojects {
             group = "${groupIdBase}.${project.parent.name}"
         }
         version = api_version_name
-        println("${project.displayName}: ${group}:${project.name}:${version}")
 
         publishing {
             publications {
@@ -55,59 +63,38 @@ subprojects {
                     }
                 }
             }
-            repositories {
-                maven {
-                    name 'ossrh'
-                    url 'https://s01.oss.sonatype.org/service/local/staging/deploy/maven2/'
-                    credentials(PasswordCredentials)
-                }
-            }
         }
 
         android {
             publishing {
                 singleVariant("release") {
                     withSourcesJar()
-                    withJavadocJar()
                 }
-            }
-        }
-
-        signing {
-            def signingKey = findProperty("signingKey")
-            def signingPassword = findProperty("signingPassword")
-            def secretKeyRingFile = findProperty("signing.secretKeyRingFile")
-
-            if (secretKeyRingFile != null && file(secretKeyRingFile).exists()) {
-                sign publishing.publications
-            } else if (signingKey != null) {
-                useInMemoryPgpKeys(signingKey, signingPassword)
-                sign publishing.publications
             }
         }
     }
 }
 
-task clean(type: Delete) {
-    delete rootProject.buildDir
+tasks.register('clean', Delete) {
+    delete rootProject.layout.buildDirectory
 }
 
 ext {
-    groupIdBase = "dev.rikka.shizuku"
+    groupIdBase = "kerneldroid.nightzuku"
 
-    POM_INCEPTION_YEAR = "2021"
+    POM_INCEPTION_YEAR = "2026"
     POM_PACKAGING = "aar"
 
-    POM_URL = "https://github.com/RikkaApps/Shizuku-API"
-    POM_SCM_URL = "https://github.com/RikkaApps/Shizuku-API"
-    POM_SCM_CONNECTION = "scm:git@github.com:RikkaApps/Shizuku-API.git"
-    POM_SCM_DEV_CONNECTION = "scm:git@github.com:RikkaApps/Shizuku-API.git"
+    POM_URL = "https://github.com/kerneldroid/nightzuku-api"
+    POM_SCM_URL = "https://github.com/kerneldroid/nightzuku-api"
+    POM_SCM_CONNECTION = "scm:git@github.com:kerneldroid/nightzuku-api.git"
+    POM_SCM_DEV_CONNECTION = "scm:git@github.com:kerneldroid/nightzuku-api.git"
 
     POM_LICENCE_NAME = "MIT License"
-    POM_LICENCE_URL = "https://github.com/RikkaApps/Shizuku-API/blob/master/LICENSE"
+    POM_LICENCE_URL = "https://github.com/kerneldroid/nightzuku-api/blob/master/LICENSE"
     POM_LICENCE_DIST = "repo"
 
-    POM_DEVELOPER_ID = "rikka"
-    POM_DEVELOPER_NAME = "Rikka"
-    POM_DEVELOPER_URL = "https://github.com/RikkaW"
+    POM_DEVELOPER_ID = "kerneldroid"
+    POM_DEVELOPER_NAME = "kerneldroid"
+    POM_DEVELOPER_URL = "https://github.com/kerneldroid"
 }
