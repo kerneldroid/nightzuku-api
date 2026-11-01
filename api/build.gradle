@@ -5,7 +5,7 @@ plugins {
 android {
     namespace 'rikka.shizuku.api'
     buildFeatures {
-        buildConfig false
+        buildConfig = false
     }
     buildTypes {
         release {
@@ -13,8 +13,8 @@ android {
         }
     }
     compileOptions {
-        sourceCompatibility JavaVersion.VERSION_11
-        targetCompatibility JavaVersion.VERSION_11
+        sourceCompatibility JavaVersion.VERSION_21
+        targetCompatibility JavaVersion.VERSION_21
     }
 }
 
@@ -22,11 +22,11 @@ dependencies {
     api project(':aidl')
     api project(':shared')
 
-    implementation 'androidx.annotation:annotation:1.3.0'
+    implementation 'androidx.annotation:annotation:1.11.0'
 }
 
 ext {
     publishLibrary = true
-    POM_NAME = "Shizuku API - API"
-    POM_DESCRIPTION = "API of Shizuku and Sui."
+    POM_NAME = "Nightzuku API - client"
+    POM_DESCRIPTION = "Native Nightzuku Kotlin client API and legacy Shizuku compatibility layer."
 }
