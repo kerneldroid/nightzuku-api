@@ -57,7 +57,7 @@ abstract class UserServiceManager {
         val componentName = Objects.requireNonNull(
             options.getParcelable<ComponentName>(USER_SERVICE_ARG_COMPONENT),
             "component is null"
-        )
+        )!!
 
         val uid = Binder.getCallingUid()
         val appId = UserHandleCompat.getAppId(uid)
@@ -123,7 +123,7 @@ abstract class UserServiceManager {
         val componentName = Objects.requireNonNull(
             validOptions.getParcelable<ComponentName>(USER_SERVICE_ARG_COMPONENT),
             "component is null"
-        )
+        )!!
         val packageName = Objects.requireNonNull(componentName.packageName, "package is null")
         val packageInfo = ensureCallingPackageForUserService(packageName, appId, userId)
 

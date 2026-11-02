@@ -30,7 +30,7 @@ abstract class Service<
 > : IShizukuService.Stub() {
 
     val userServiceManager: UserServiceMgr
-    open val configManager: ConfigMgr
+    val configManager: ConfigMgr
     val clientManager: ClientMgr
     private val rishService: RishService
 
