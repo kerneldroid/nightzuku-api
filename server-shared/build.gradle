@@ -31,4 +31,6 @@ dependencies {
     implementation libs.refine.runtime
     implementation libs.hidden.compat
     compileOnly libs.hidden.stub
+
+    testImplementation 'junit:junit:4.13.2'
 }

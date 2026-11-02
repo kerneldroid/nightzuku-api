@@ -1,15 +1,51 @@
+/*
+ * Copyright (c) 2021 RikkaW
+ * Portions adapted from d4rken-org/porter-api (PorshService, PorshHostRegistry, EnvPolicy) under Apache-2.0 / MIT:
+ * - ConcurrentHashMap host registry with stale exited host reaping (UNCOLLECTED_MAX_AGE_MILLIS)
+ * - Bounded exit-code await with conditional removal so replacement hosts of the same PID survive
+ */
+
 package rikka.rish
 
 import android.os.Binder
 import android.os.IBinder
 import android.os.Parcel
 import android.os.ParcelFileDescriptor
+import android.os.SystemClock
 import android.system.Os
 import android.util.Log
-import java.util.Collections
-import java.util.HashMap
+import java.util.concurrent.ConcurrentHashMap
 
 abstract class RishService {
+
+    private fun resolveEnv(env: Array<String>?): Array<String>? {
+        if (env == null) return null
+        var nightzukuPref: Boolean? = null
+        var rishPref: Boolean? = null
+
+        for (entry in env) {
+            when (entry) {
+                "NIGHTZUKU_PRESERVE_ENV=1" -> if (nightzukuPref == null) nightzukuPref = true
+                "NIGHTZUKU_PRESERVE_ENV=0" -> if (nightzukuPref == null) nightzukuPref = false
+                "RISH_PRESERVE_ENV=1" -> if (rishPref == null) rishPref = true
+                "RISH_PRESERVE_ENV=0" -> if (rishPref == null) rishPref = false
+            }
+        }
+
+        val allowEnv = nightzukuPref ?: rishPref ?: IS_ROOT
+        return if (allowEnv) env else null
+    }
+
+    private fun reapUncollectedHosts() {
+        val now = SystemClock.elapsedRealtime()
+        for ((pid, host) in HOSTS) {
+            if (!host.hasExited()) continue
+            if (now - host.exitedAtMillis <= UNCOLLECTED_MAX_AGE_MILLIS) continue
+            if (HOSTS.remove(pid, host)) {
+                Log.d(TAG, "Reaped uncollected host of pid=$pid")
+            }
+        }
+    }
 
     private fun createHost(
         args: Array<String>?,
@@ -21,21 +57,9 @@ abstract class RishService {
         stderr: ParcelFileDescriptor?
     ) {
         val callingPid = Binder.getCallingPid()
+        reapUncollectedHosts()
 
-        var allowEnv = IS_ROOT
-        if (env != null) {
-            for (e in env) {
-                if ("RISH_PRESERVE_ENV=1" == e) {
-                    allowEnv = true
-                    break
-                } else if ("RISH_PRESERVE_ENV=0" == e) {
-                    allowEnv = false
-                    break
-                }
-            }
-        }
-        val effectiveEnv = if (allowEnv) env else null
-
+        val effectiveEnv = resolveEnv(env)
         val host = RishHost(args, effectiveEnv, dir, tty, stdin, stdout, stderr)
         host.start()
         Log.d(TAG, "Forked ${host.pid}")
@@ -60,6 +84,11 @@ abstract class RishService {
             Log.d(TAG, "Not existing host created by $callingPid")
             return -1
         }
+        val code = host.awaitExitCode(EXIT_CODE_TIMEOUT_MILLIS)
+        if (!host.hasExited()) {
+            return code
+        }
+        HOSTS.remove(callingPid, host)
         return host.exitCode
     }
 
@@ -74,7 +103,7 @@ abstract class RishService {
                 return true
             }
 
-            data.enforceInterface(RishConfig.getInterfaceToken()!!)
+            data.enforceInterface(RishConfig.getInterfaceToken())
             val tty = data.readByte()
             val stdin = data.readFileDescriptor()
             val stdout = data.readFileDescriptor()
@@ -93,7 +122,7 @@ abstract class RishService {
             Log.d(TAG, "TRANSACTION_setWindowSize")
             enforceCallingPermission("setWindowSize")
 
-            data.enforceInterface(RishConfig.getInterfaceToken()!!)
+            data.enforceInterface(RishConfig.getInterfaceToken())
             val size = data.readLong()
             setWindowSize(size)
             reply?.writeNoException()
@@ -102,7 +131,7 @@ abstract class RishService {
             Log.d(TAG, "TRANSACTION_getExitCode")
             enforceCallingPermission("getExitCode")
 
-            data.enforceInterface(RishConfig.getInterfaceToken()!!)
+            data.enforceInterface(RishConfig.getInterfaceToken())
             val exitCode = getExitCode()
             if (reply != null) {
                 reply.writeNoException()
@@ -115,7 +144,9 @@ abstract class RishService {
 
     companion object {
         private const val TAG = "RishService"
-        private val HOSTS: MutableMap<Int, RishHost> = Collections.synchronizedMap(HashMap())
+        private const val EXIT_CODE_TIMEOUT_MILLIS = 5_000L
+        private const val UNCOLLECTED_MAX_AGE_MILLIS = 60_000L
+        private val HOSTS = ConcurrentHashMap<Int, RishHost>()
         private val IS_ROOT: Boolean = Os.getuid() == 0
     }
 }

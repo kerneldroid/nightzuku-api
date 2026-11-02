@@ -42,22 +42,21 @@ object ParcelFileDescriptorUtil {
             try {
                 while (true) {
                     val len = mIn.read(buf)
-                    if (len <= 0) break
+                    if (len < 0) break
+                    if (len == 0) continue
                     mOut.write(buf, 0, len)
                     mOut.flush()
                 }
             } catch (e: IOException) {
-                Log.e("TransferThread", Log.getStackTraceString(e))
+                Log.w("TransferThread", "Pipe transfer terminated: ${e.message}")
             } finally {
                 try {
                     mIn.close()
-                } catch (e: IOException) {
-                    e.printStackTrace()
+                } catch (_: IOException) {
                 }
                 try {
                     mOut.close()
-                } catch (e: IOException) {
-                    e.printStackTrace()
+                } catch (_: IOException) {
                 }
             }
         }

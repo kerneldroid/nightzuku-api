@@ -15,32 +15,64 @@ import moe.shizuku.server.IRemoteProcess
 
 class ShizukuRemoteProcess : Process, Parcelable {
 
+    @Volatile
     private var remote: IRemoteProcess?
+    private var deathRecipient: IBinder.DeathRecipient? = null
     private var os: OutputStream? = null
     private var `is`: InputStream? = null
+    private var es: InputStream? = null
 
     internal constructor(remote: IRemoteProcess) {
         this.remote = remote
-        try {
-            remote.asBinder().linkToDeath({
-                this.remote = null
-                Log.v(TAG, "remote process is dead")
-                CACHE.remove(this@ShizukuRemoteProcess)
-            }, 0)
-        } catch (e: RemoteException) {
-            Log.e(TAG, "linkToDeath", e)
-        }
-        CACHE.add(this)
+        linkRemoteToDeath(remote)
     }
 
     private constructor(parcel: Parcel) {
-        remote = IRemoteProcess.Stub.asInterface(parcel.readStrongBinder())
+        val parsed = IRemoteProcess.Stub.asInterface(parcel.readStrongBinder())
+        this.remote = parsed
+        if (parsed != null) {
+            linkRemoteToDeath(parsed)
+        }
+    }
+
+    @Synchronized
+    private fun linkRemoteToDeath(target: IRemoteProcess) {
+        try {
+            val recipient = IBinder.DeathRecipient {
+                synchronized(this@ShizukuRemoteProcess) {
+                    this.remote = null
+                    this.deathRecipient = null
+                }
+                Log.v(TAG, "remote process is dead")
+                CACHE.remove(this@ShizukuRemoteProcess)
+            }
+            target.asBinder().linkToDeath(recipient, 0)
+            this.deathRecipient = recipient
+            CACHE.add(this)
+        } catch (e: RemoteException) {
+            Log.e(TAG, "linkToDeath", e)
+        }
+    }
+
+    @Synchronized
+    private fun unlinkToDeathAndRemove() {
+        val currentRemote = remote
+        val recipient = deathRecipient
+        if (currentRemote != null && recipient != null) {
+            try {
+                currentRemote.asBinder().unlinkToDeath(recipient, 0)
+            } catch (_: Throwable) {
+            }
+            deathRecipient = null
+        }
+        CACHE.remove(this)
     }
 
     private fun requireRemote(): IRemoteProcess {
         return remote ?: throw IllegalStateException("Remote process binder is dead")
     }
 
+    @Synchronized
     override fun getOutputStream(): OutputStream {
         if (os == null) {
             os = try {
@@ -52,6 +84,7 @@ class ShizukuRemoteProcess : Process, Parcelable {
         return os!!
     }
 
+    @Synchronized
     override fun getInputStream(): InputStream {
         if (`is` == null) {
             `is` = try {
@@ -63,12 +96,16 @@ class ShizukuRemoteProcess : Process, Parcelable {
         return `is`!!
     }
 
+    @Synchronized
     override fun getErrorStream(): InputStream {
-        return try {
-            ParcelFileDescriptor.AutoCloseInputStream(requireRemote().errorStream)
-        } catch (e: RemoteException) {
-            throw RuntimeException(e)
+        if (es == null) {
+            es = try {
+                ParcelFileDescriptor.AutoCloseInputStream(requireRemote().errorStream)
+            } catch (e: RemoteException) {
+                throw RuntimeException(e)
+            }
         }
+        return es!!
     }
 
     @Throws(InterruptedException::class)
@@ -77,15 +114,19 @@ class ShizukuRemoteProcess : Process, Parcelable {
             requireRemote().waitFor()
         } catch (e: RemoteException) {
             throw RuntimeException(e)
+        } finally {
+            unlinkToDeathAndRemove()
         }
     }
 
     override fun exitValue(): Int {
-        return try {
+        val code = try {
             requireRemote().exitValue()
         } catch (e: RemoteException) {
             throw RuntimeException(e)
         }
+        unlinkToDeathAndRemove()
+        return code
     }
 
     override fun destroy() {
@@ -93,6 +134,8 @@ class ShizukuRemoteProcess : Process, Parcelable {
             requireRemote().destroy()
         } catch (e: RemoteException) {
             throw RuntimeException(e)
+        } finally {
+            unlinkToDeathAndRemove()
         }
     }
 
@@ -106,11 +149,15 @@ class ShizukuRemoteProcess : Process, Parcelable {
 
     @Throws(InterruptedException::class)
     fun waitForTimeout(timeout: Long, unit: TimeUnit): Boolean {
-        return try {
+        val exited = try {
             requireRemote().waitForTimeout(timeout, unit.toString())
         } catch (e: RemoteException) {
             throw RuntimeException(e)
         }
+        if (exited) {
+            unlinkToDeathAndRemove()
+        }
+        return exited
     }
 
     fun asBinder(): IBinder = requireRemote().asBinder()

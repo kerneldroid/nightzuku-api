@@ -1,5 +1,6 @@
 package kerneldroid.nightzuku.api
 
+import android.content.Context
 import rikka.shizuku.ShizukuProvider
 
 /**
@@ -11,5 +12,8 @@ open class NightProvider : ShizukuProvider() {
     companion object {
         const val PERMISSION: String = "kerneldroid.nightzuku.permission.API"
         const val MANAGER_APPLICATION_ID: String = "kerneldroid.nightzuku"
+
+        @JvmStatic
+        fun connectFast(context: Context): Boolean = NightClient.connectFast(context)
     }
 }

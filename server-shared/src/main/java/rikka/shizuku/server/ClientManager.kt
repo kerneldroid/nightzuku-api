@@ -65,17 +65,34 @@ open class ClientManager<ConfigMgr : ConfigManager>(
 
         val binder = client.asBinder()
         val deathRecipient = IBinder.DeathRecipient {
-            clientRecords.remove(clientRecord)
+            synchronized(clientRecords) {
+                clientRecords.remove(clientRecord)
+            }
+            onClientRemoved(clientRecord)
         }
         try {
             binder.linkToDeath(deathRecipient, 0)
+            clientRecord.deathRecipient = deathRecipient
         } catch (e: RemoteException) {
             LOGGER.w(e, "addClient: linkToDeath failed")
             return null
         }
 
-        clientRecords.add(clientRecord)
+        synchronized(clientRecords) {
+            val iterator = clientRecords.iterator()
+            while (iterator.hasNext()) {
+                val existing = iterator.next()
+                if (existing.uid == uid && existing.pid == pid) {
+                    existing.unlinkToDeath()
+                    iterator.remove()
+                }
+            }
+            clientRecords.add(clientRecord)
+        }
         return clientRecord
+    }
+
+    protected open fun onClientRemoved(clientRecord: ClientRecord) {
     }
 
     companion object {

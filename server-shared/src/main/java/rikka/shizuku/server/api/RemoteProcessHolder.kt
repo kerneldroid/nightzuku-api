@@ -17,6 +17,7 @@ class RemoteProcessHolder(
     private var deathRecipient: IBinder.DeathRecipient? = null
     private var `in`: ParcelFileDescriptor? = null
     private var out: ParcelFileDescriptor? = null
+    private var err: ParcelFileDescriptor? = null
 
     init {
         if (token != null) {
@@ -53,6 +54,13 @@ class RemoteProcessHolder(
     }
 
     @Synchronized
+    private fun closeCachedStreams() {
+        runCatching { `in`?.close() }
+        runCatching { out?.close() }
+        runCatching { err?.close() }
+    }
+
+    @Synchronized
     override fun getOutputStream(): ParcelFileDescriptor {
         if (out == null) {
             out = try {
@@ -76,12 +84,16 @@ class RemoteProcessHolder(
         return `in`!!
     }
 
+    @Synchronized
     override fun getErrorStream(): ParcelFileDescriptor {
-        return try {
-            ParcelFileDescriptorUtil.pipeFrom(process.errorStream)
-        } catch (e: IOException) {
-            throw IllegalStateException(e)
+        if (err == null) {
+            err = try {
+                ParcelFileDescriptorUtil.pipeFrom(process.errorStream)
+            } catch (e: IOException) {
+                throw IllegalStateException(e)
+            }
         }
+        return err!!
     }
 
     override fun waitFor(): Int {
@@ -105,6 +117,7 @@ class RemoteProcessHolder(
         try {
             process.destroy()
         } finally {
+            closeCachedStreams()
             unlinkTokenToDeath()
         }
     }

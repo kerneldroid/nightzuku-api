@@ -2,9 +2,9 @@ package kerneldroid.nightzuku.api
 
 import android.os.Binder
 import android.os.Bundle
-import android.os.IBinder
 import android.os.Parcel
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertSame
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -95,5 +95,36 @@ class LegacyParcelCodecTest {
         assertEquals(6, bundle.getInt("shizuku:attach-reply-patch-version"))
         assertEquals("u:r:shell:s0", bundle.getString("shizuku:attach-reply-secontext"))
         assertTrue(bundle.getBoolean("shizuku:attach-reply-permission-granted"))
+    }
+
+    @Test
+    fun `NightProtocol transaction codes and capability masks are mutually distinct`() {
+        val transactions = listOf(
+            NightProtocol.TRANSACTION_ATTACH,
+            NightProtocol.TRANSACTION_TRANSACT_REMOTE,
+            NightProtocol.TRANSACTION_EXEC_FAST,
+            NightProtocol.TRANSACTION_CHECK_PERMISSION,
+            NightProtocol.TRANSACTION_REQUEST_PERMISSION,
+            NightProtocol.TRANSACTION_GET_SYSTEM_PROPERTY,
+            NightProtocol.TRANSACTION_SET_SYSTEM_PROPERTY,
+            NightProtocol.TRANSACTION_CLAIM_USER_SERVICE,
+            NightProtocol.TRANSACTION_GET_UID_CAPABILITIES,
+            NightProtocol.TRANSACTION_SET_UID_CAPABILITIES,
+            NightProtocol.TRANSACTION_GET_ACCESS_PAUSED,
+            NightProtocol.TRANSACTION_SET_ACCESS_PAUSED,
+            NightProtocol.TRANSACTION_GET_SERVER_DIAGNOSTICS,
+            NightProtocol.TRANSACTION_ADD_USER_SERVICE,
+            NightProtocol.TRANSACTION_REMOVE_USER_SERVICE,
+            NightProtocol.TRANSACTION_NEW_PROCESS
+        )
+        assertEquals(transactions.size, transactions.distinct().size)
+
+        val allCaps = NightProtocol.CAP_SHELL_EXEC or
+            NightProtocol.CAP_BINDER_PROXY or
+            NightProtocol.CAP_USER_SERVICE or
+            NightProtocol.CAP_SYSTEM_PROPS
+        assertEquals(NightProtocol.MASK_CAPABILITIES, allCaps)
+        assertEquals(NightProtocol.DEFAULT_CAPABILITIES, allCaps)
+        assertNotEquals(NightProtocol.METHOD_SEND_BINDER, NightProtocol.METHOD_REQUEST_BINDER)
     }
 }

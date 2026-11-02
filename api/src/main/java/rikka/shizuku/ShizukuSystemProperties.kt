@@ -27,14 +27,14 @@ object ShizukuSystemProperties {
     @Throws(RemoteException::class)
     fun getInt(key: String, def: Int): Int {
         val raw = get(key, def.toString())
-        return if (raw.isNullOrEmpty()) def else Integer.decode(raw)
+        return if (raw.isNullOrEmpty()) def else runCatching { Integer.decode(raw) }.getOrDefault(def)
     }
 
     @JvmStatic
     @Throws(RemoteException::class)
     fun getLong(key: String, def: Long): Long {
         val raw = get(key, def.toString())
-        return if (raw.isNullOrEmpty()) def else java.lang.Long.decode(raw)
+        return if (raw.isNullOrEmpty()) def else runCatching { java.lang.Long.decode(raw) }.getOrDefault(def)
     }
 
     @JvmStatic

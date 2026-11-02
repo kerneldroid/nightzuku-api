@@ -16,9 +16,12 @@ object NightProtocol {
 
     const val PROVIDER_SUFFIX = ".nightzuku"
     const val LEGACY_PROVIDER_SUFFIX = ".shizuku"
+    const val CONNECTOR_SUFFIX = ".connector"
 
     const val METHOD_SEND_BINDER = "sendNightBinder"
     const val METHOD_GET_BINDER = "getNightBinder"
+    const val METHOD_REQUEST_BINDER = "requestNightBinder"
+    const val LEGACY_METHOD_REQUEST_BINDER = "requestBinder"
     const val METHOD_SEND_USER_SERVICE = "sendNightUserService"
 
     const val EXTRA_BINDER = "kerneldroid.nightzuku.extra.BINDER"
@@ -38,6 +41,11 @@ object NightProtocol {
     const val STATE_GRANTED = 1
     const val STATE_DENIED_PERMANENT = 2
 
+    // UserService result codes (aligned with Shizuku v13+ and Porter)
+    const val USER_SERVICE_RESULT_BOUND = 0
+    const val USER_SERVICE_RESULT_NOT_RUNNING = -1
+    const val USER_SERVICE_RESULT_NO_SUCH_SERVICE = 1
+
     // INightService transaction codes
     const val TRANSACTION_ATTACH = IBinder.FIRST_CALL_TRANSACTION + 1
     const val TRANSACTION_TRANSACT_REMOTE = IBinder.FIRST_CALL_TRANSACTION + 2
@@ -52,6 +60,9 @@ object NightProtocol {
     const val TRANSACTION_GET_ACCESS_PAUSED = IBinder.FIRST_CALL_TRANSACTION + 11
     const val TRANSACTION_SET_ACCESS_PAUSED = IBinder.FIRST_CALL_TRANSACTION + 12
     const val TRANSACTION_GET_SERVER_DIAGNOSTICS = IBinder.FIRST_CALL_TRANSACTION + 13
+    const val TRANSACTION_ADD_USER_SERVICE = IBinder.FIRST_CALL_TRANSACTION + 14
+    const val TRANSACTION_REMOVE_USER_SERVICE = IBinder.FIRST_CALL_TRANSACTION + 15
+    const val TRANSACTION_NEW_PROCESS = IBinder.FIRST_CALL_TRANSACTION + 16
 
     // INightCallback transaction codes
     const val CALLBACK_ON_PERMISSION_CHANGED = IBinder.FIRST_CALL_TRANSACTION + 1

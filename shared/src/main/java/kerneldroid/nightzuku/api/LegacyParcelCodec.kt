@@ -22,9 +22,17 @@ object LegacyParcelCodec {
     private const val VAL_STRING = 0
     private const val VAL_INTEGER = 1
     private const val VAL_PARCELABLE = 4
+    private const val VAL_SHORT = 5
     private const val VAL_LONG = 6
+    private const val VAL_FLOAT = 7
+    private const val VAL_DOUBLE = 8
     private const val VAL_BOOLEAN = 9
+    private const val VAL_BYTEARRAY = 13
+    private const val VAL_STRINGARRAY = 14
     private const val VAL_IBINDER = 15
+    private const val VAL_INTARRAY = 18
+    private const val VAL_LONGARRAY = 19
+    private const val VAL_BYTE = 20
 
     const val TRANSACTION_BIND_APPLICATION = 2
     private const val TRANSACTION_DISPATCH_PERMISSION_RESULT = 3
@@ -80,6 +88,7 @@ object LegacyParcelCodec {
     fun extractBinderFromBundle(bundle: Bundle?): IBinder? {
         if (bundle == null) return null
 
+        var sawLegacyParcelable = false
         val parcel = Parcel.obtain()
         try {
             bundle.writeToParcel(parcel, 0)
@@ -99,6 +108,7 @@ object LegacyParcelCodec {
                             return parcel.readStrongBinder()
                         }
                         if (key == LEGACY_BINDER_EXTRA_KEY && type == VAL_PARCELABLE) {
+                            sawLegacyParcelable = true
                             val posBeforeClass = parcel.dataPosition()
                             val directClassName = parcel.readString()
                             if (directClassName == LEGACY_BINDER_CONTAINER_CLASS) {
@@ -118,8 +128,14 @@ object LegacyParcelCodec {
                         when (type) {
                             VAL_NULL -> Unit
                             VAL_STRING -> parcel.readString()
-                            VAL_INTEGER, VAL_BOOLEAN -> parcel.readInt()
+                            VAL_INTEGER, VAL_BOOLEAN, VAL_SHORT, VAL_BYTE -> parcel.readInt()
                             VAL_LONG -> parcel.readLong()
+                            VAL_FLOAT -> parcel.readFloat()
+                            VAL_DOUBLE -> parcel.readDouble()
+                            VAL_BYTEARRAY -> parcel.createByteArray()
+                            VAL_STRINGARRAY -> parcel.createStringArray()
+                            VAL_INTARRAY -> parcel.createIntArray()
+                            VAL_LONGARRAY -> parcel.createLongArray()
                             VAL_IBINDER -> parcel.readStrongBinder()
                             else -> break
                         }
@@ -129,6 +145,10 @@ object LegacyParcelCodec {
         } catch (_: Throwable) {
         } finally {
             parcel.recycle()
+        }
+
+        if (sawLegacyParcelable) {
+            return null
         }
 
         return try {

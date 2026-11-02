@@ -1,5 +1,13 @@
+/*
+ * Copyright (c) 2021 RikkaW
+ * Portions adapted from d4rken-org/porter-api (PorterApiProvider) under Apache-2.0 / MIT:
+ * - Single cached BroadcastReceiver registered on applicationContext to prevent Activity context leaks
+ * - Provider authority ownership check before cross-process ContentResolver.call
+ */
+
 package rikka.shizuku
 
+import android.annotation.SuppressLint
 import android.content.BroadcastReceiver
 import android.content.ContentProvider
 import android.content.ContentValues
@@ -149,11 +157,16 @@ open class ShizukuProvider : ContentProvider() {
         const val NIGHT_PERMISSION: String = "kerneldroid.nightzuku.permission.API"
         const val MANAGER_APPLICATION_ID: String = "kerneldroid.nightzuku"
 
+        private val receiverRegistrationLock = Any()
+
         @Volatile
         private var enableMultiProcess: Boolean = false
 
         @Volatile
         private var isProviderProcess: Boolean = false
+
+        @Volatile
+        private var nonProviderReceiver: BroadcastReceiver? = null
 
         @JvmStatic
         fun setIsProviderProcess(isProviderProcess: Boolean) {
@@ -173,67 +186,104 @@ open class ShizukuProvider : ContentProvider() {
         fun disableAutomaticSuiInitialization() {
         }
 
+        /**
+         * Proactively requests the privileged binder for the current process from the Nightzuku Manager.
+         */
         @JvmStatic
+        fun connectFast(context: Context): Boolean = NightClient.connectFast(context)
+
+        @JvmStatic
+        @SuppressLint("UnspecifiedRegisterReceiverFlag")
         fun requestBinderForNonProviderProcess(context: Context) {
             if (isProviderProcess) return
 
-            val receiver = object : BroadcastReceiver() {
-                override fun onReceive(ctx: Context, intent: Intent) {
-                    when (intent.action) {
-                        ACTION_NIGHT_BINDER_RECEIVED -> {
-                            val binder = intent.extras?.getBinder(NightProtocol.EXTRA_BINDER)
-                            if (binder != null) {
-                                NightClient.onBinderReceived(binder, ctx.packageName)
-                            }
-                        }
-                        ACTION_BINDER_RECEIVED -> {
-                            @Suppress("DEPRECATION")
-                            val container = intent.getParcelableExtra<BinderContainer>(EXTRA_BINDER)
-                            val binder = container?.binder
-                            if (binder != null) {
-                                Shizuku.onBinderReceived(binder, ctx.packageName)
+            val appContext = context.applicationContext ?: context
+
+            synchronized(receiverRegistrationLock) {
+                if (nonProviderReceiver == null) {
+                    val created = object : BroadcastReceiver() {
+                        override fun onReceive(ctx: Context, intent: Intent) {
+                            when (intent.action) {
+                                ACTION_NIGHT_BINDER_RECEIVED -> {
+                                    val binder = intent.extras?.getBinder(NightProtocol.EXTRA_BINDER)
+                                    if (binder != null && binder.pingBinder()) {
+                                        NightClient.onBinderReceived(binder, ctx.packageName)
+                                    } else {
+                                        fetchBinderFromOwnProvider(appContext)
+                                    }
+                                }
+                                ACTION_BINDER_RECEIVED -> {
+                                    @Suppress("DEPRECATION")
+                                    val container = intent.getParcelableExtra<BinderContainer>(EXTRA_BINDER)
+                                    val binder = container?.binder
+                                    if (binder != null && binder.pingBinder()) {
+                                        Shizuku.onBinderReceived(binder, ctx.packageName)
+                                    } else {
+                                        fetchBinderFromOwnProvider(appContext)
+                                    }
+                                }
                             }
                         }
                     }
+                    val filter = IntentFilter().apply {
+                        addAction(ACTION_NIGHT_BINDER_RECEIVED)
+                        addAction(ACTION_BINDER_RECEIVED)
+                    }
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                        appContext.registerReceiver(created, filter, Context.RECEIVER_NOT_EXPORTED)
+                    } else {
+                        appContext.registerReceiver(created, filter)
+                    }
+                    nonProviderReceiver = created
                 }
             }
 
-            val filter = IntentFilter().apply {
-                addAction(ACTION_NIGHT_BINDER_RECEIVED)
-                addAction(ACTION_BINDER_RECEIVED)
-            }
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-                context.registerReceiver(receiver, filter, Context.RECEIVER_NOT_EXPORTED)
-            } else {
-                context.registerReceiver(receiver, filter)
-            }
+            fetchBinderFromOwnProvider(appContext)
+        }
 
-            val nightReply = runCatching {
-                context.contentResolver.call(
-                    Uri.parse("content://${context.packageName}${NightProtocol.PROVIDER_SUFFIX}"),
-                    NightProtocol.METHOD_GET_BINDER,
-                    null,
-                    Bundle()
-                )
-            }.getOrNull()
-            val nightBinder = nightReply?.getBinder(NightProtocol.EXTRA_BINDER)
-            if (nightBinder != null) {
-                NightClient.onBinderReceived(nightBinder, context.packageName)
-            }
-
-            val legacyReply = runCatching {
-                context.contentResolver.call(
-                    Uri.parse("content://${context.packageName}${NightProtocol.LEGACY_PROVIDER_SUFFIX}"),
-                    METHOD_GET_BINDER,
-                    null,
-                    Bundle()
-                )
-            }.getOrNull()
-            if (legacyReply != null) {
-                val binder = LegacyParcelCodec.extractBinderFromBundle(legacyReply)
-                if (binder != null) {
-                    Shizuku.onBinderReceived(binder, context.packageName)
+        private fun fetchBinderFromOwnProvider(appContext: Context) {
+            val pkg = appContext.packageName
+            val nightAuthority = "$pkg${NightProtocol.PROVIDER_SUFFIX}"
+            if (ownsProviderAuthority(appContext, nightAuthority)) {
+                val nightReply = runCatching {
+                    appContext.contentResolver.call(
+                        Uri.parse("content://$nightAuthority"),
+                        NightProtocol.METHOD_GET_BINDER,
+                        null,
+                        Bundle()
+                    )
+                }.getOrNull()
+                val nightBinder = LegacyParcelCodec.extractBinderFromBundle(nightReply)
+                    ?: nightReply?.getBinder(NightProtocol.EXTRA_BINDER)
+                if (nightBinder != null && nightBinder.pingBinder()) {
+                    NightClient.onBinderReceived(nightBinder, pkg)
                 }
+            }
+
+            val legacyAuthority = "$pkg${NightProtocol.LEGACY_PROVIDER_SUFFIX}"
+            if (ownsProviderAuthority(appContext, legacyAuthority)) {
+                val legacyReply = runCatching {
+                    appContext.contentResolver.call(
+                        Uri.parse("content://$legacyAuthority"),
+                        METHOD_GET_BINDER,
+                        null,
+                        Bundle()
+                    )
+                }.getOrNull()
+                if (legacyReply != null) {
+                    val binder = LegacyParcelCodec.extractBinderFromBundle(legacyReply)
+                    if (binder != null && binder.pingBinder()) {
+                        Shizuku.onBinderReceived(binder, pkg)
+                    }
+                }
+            }
+        }
+
+        private fun ownsProviderAuthority(context: Context, authority: String): Boolean {
+            return try {
+                context.packageManager.resolveContentProvider(authority, 0)?.packageName == context.packageName
+            } catch (_: Throwable) {
+                false
             }
         }
     }

@@ -1,3 +1,9 @@
+/*
+ * Copyright (c) 2021 RikkaW
+ * Portions adapted from d4rken-org/porter-api (PorshTerminal) under Apache-2.0 / MIT:
+ * - `routable(tty)` clears ATTY_IN and ATTY_ERR when ATTY_OUT is piped, so stdin/stderr use pipes instead of blocking on a PTY whose output is not connected
+ */
+
 package rikka.rish
 
 import android.os.Parcel
@@ -12,7 +18,10 @@ class RishTerminal @Throws(ErrnoException::class, RemoteException::class) constr
     private val argv: Array<String>
 ) {
 
-    private val tty: Byte = prepare()
+    private val tty: Byte = run {
+        RishConfig.ensureLibraryLoaded()
+        routable(prepare())
+    }
     private var stdin: Array<FileDescriptor>? = null
     private var stdout: Array<FileDescriptor>? = null
     private var stderr: Array<FileDescriptor>? = null
@@ -38,7 +47,7 @@ class RishTerminal @Throws(ErrnoException::class, RemoteException::class) constr
         val dir = File("").absolutePath
 
         try {
-            data.writeInterfaceToken(RishConfig.getInterfaceToken()!!)
+            data.writeInterfaceToken(RishConfig.getInterfaceToken())
             data.writeByte(tty)
             val stdinPipe = Os.pipe()
             stdin = stdinPipe
@@ -54,7 +63,7 @@ class RishTerminal @Throws(ErrnoException::class, RemoteException::class) constr
             data.writeStringArray(argv)
             data.writeStringArray(env)
             data.writeString(dir)
-            RishConfig.getBinder()!!.transact(
+            RishConfig.getBinder().transact(
                 RishConfig.getTransactionCode(RishConfig.TRANSACTION_createHost),
                 data,
                 reply,
@@ -73,6 +82,7 @@ class RishTerminal @Throws(ErrnoException::class, RemoteException::class) constr
 
     fun start() {
         Log.d(TAG, "start")
+        RishConfig.ensureLibraryLoaded()
 
         ttyFd = start(tty, getFd(stdin, 1), getFd(stdout, 0), getFd(stderr, 0))
 
@@ -100,9 +110,9 @@ class RishTerminal @Throws(ErrnoException::class, RemoteException::class) constr
         val data = Parcel.obtain()
         val reply = Parcel.obtain()
         try {
-            data.writeInterfaceToken(RishConfig.getInterfaceToken()!!)
+            data.writeInterfaceToken(RishConfig.getInterfaceToken())
             data.writeLong(size)
-            RishConfig.getBinder()!!.transact(
+            RishConfig.getBinder().transact(
                 RishConfig.getTransactionCode(RishConfig.TRANSACTION_setWindowSize),
                 data,
                 reply,
@@ -121,8 +131,8 @@ class RishTerminal @Throws(ErrnoException::class, RemoteException::class) constr
         val data = Parcel.obtain()
         val reply = Parcel.obtain()
         return try {
-            data.writeInterfaceToken(RishConfig.getInterfaceToken()!!)
-            RishConfig.getBinder()!!.transact(
+            data.writeInterfaceToken(RishConfig.getInterfaceToken())
+            RishConfig.getBinder().transact(
                 RishConfig.getTransactionCode(RishConfig.TRANSACTION_getExitCode),
                 data,
                 reply,
@@ -167,8 +177,19 @@ class RishTerminal @Throws(ErrnoException::class, RemoteException::class) constr
             FileDescriptors.closeSilently(fileDescriptor[i])
         }
 
+        /**
+         * When stdout is piped (`rish -c cmd | grep x`), clears `ATTY_ERR` so stderr is sent
+         * over a pipe rather than landing on a PTY that stdout is not reading.
+         */
         @JvmStatic
-        private external fun prepare(): Byte
+        internal fun routable(tty: Byte): Byte {
+            val bits = tty.toInt()
+            if ((bits and RishConstants.ATTY_OUT) != 0) return tty
+            return (bits and RishConstants.ATTY_IN.inv() and RishConstants.ATTY_ERR.inv()).toByte()
+        }
+
+        @JvmStatic
+        external fun prepare(): Byte
 
         @JvmStatic
         private external fun start(tty: Byte, stdin: Int, stdout: Int, stderr: Int): Int

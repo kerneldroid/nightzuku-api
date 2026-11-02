@@ -1,6 +1,7 @@
 package rikka.shizuku.server
 
 import android.os.Bundle
+import android.os.IBinder
 import moe.shizuku.server.IShizukuApplication
 import rikka.shizuku.ShizukuApiConstants.REQUEST_PERMISSION_REPLY_ALLOWED
 import rikka.shizuku.server.util.Logger
@@ -14,7 +15,21 @@ open class ClientRecord(
 ) {
 
     @JvmField
+    @Volatile
     var allowed: Boolean = false
+
+    @Volatile
+    internal var deathRecipient: IBinder.DeathRecipient? = null
+
+    internal fun unlinkToDeath() {
+        val recipient = deathRecipient ?: return
+        deathRecipient = null
+        val binder = client?.asBinder() ?: return
+        try {
+            binder.unlinkToDeath(recipient, 0)
+        } catch (_: Throwable) {
+        }
+    }
 
     open fun dispatchRequestPermissionResult(requestCode: Int, allowed: Boolean) {
         val reply = Bundle().apply {

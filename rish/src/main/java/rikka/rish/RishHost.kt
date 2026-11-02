@@ -1,10 +1,21 @@
+/*
+ * Copyright (c) 2021 RikkaW
+ * Portions adapted from d4rken-org/porter-api (PorshHost) under Apache-2.0 / MIT:
+ * - Synchronized ptmx lifecycle (`ptmxLock` + `closePtmx()`) so window resizes never hit a closed/reused fd
+ * - CountDownLatch exit synchronization (`awaitExitCode`, `hasExited`, `exitedAtMillis`)
+ */
+
 package rikka.rish
 
 import android.os.ParcelFileDescriptor
+import android.os.SystemClock
 import android.util.Log
+import java.io.IOException
 import java.nio.charset.StandardCharsets
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
 
-class RishHost(
+open class RishHost(
     private val args: Array<String>?,
     private val env: Array<String>?,
     private val dir: String?,
@@ -17,20 +28,26 @@ class RishHost(
     private val stdinFd: Int = detachFd(stdin)
     private val stdoutFd: Int = detachFd(stdout)
     private val stderrFd: Int = detachFd(stderr)
+    private val exited = CountDownLatch(1)
+    private val ptmxLock = Any()
 
     @Volatile
     var pid: Int = 0
         private set
 
-    @Volatile
-    private var ptmx: Int = 0
+    private var ptmx: Int = -1
 
     @Volatile
     var exitCode: Int = Int.MAX_VALUE
         private set
 
-    fun start() {
+    @Volatile
+    internal var exitedAtMillis: Long = 0L
+        private set
+
+    open fun start() {
         Log.d(TAG, "start")
+        RishConfig.ensureLibraryLoaded()
 
         val argBlock = createCBytesForStringArray(args)
         val envBlock = createCBytesForStringArray(env)
@@ -49,16 +66,56 @@ class RishHost(
         )
 
         pid = result[0]
-        ptmx = result[1]
+        synchronized(ptmxLock) {
+            ptmx = result[1]
+        }
 
-        val waitThread = Thread({ exitCode = waitFor(pid) }, "rish-wait-$pid")
+        val waitThread = Thread({ onExited(waitFor(pid)) }, "rish-wait-$pid")
         waitThread.isDaemon = true
         waitThread.start()
     }
 
-    fun setWindowSize(size: Long) {
+    internal fun onExited(code: Int) {
+        closePtmx()
+        exitCode = code
+        exitedAtMillis = SystemClock.elapsedRealtime()
+        exited.countDown()
+    }
+
+    internal fun hasExited(): Boolean = exited.count == 0L
+
+    internal fun awaitExitCode(timeoutMillis: Long): Int {
+        try {
+            if (!exited.await(timeoutMillis, TimeUnit.MILLISECONDS)) {
+                Log.w(TAG, "Timed out waiting for $pid to exit")
+                return -1
+            }
+        } catch (_: InterruptedException) {
+            Thread.currentThread().interrupt()
+            return -1
+        }
+        return exitCode
+    }
+
+    open fun setWindowSize(size: Long) {
         Log.d(TAG, "setWindowSize")
-        setWindowSize(ptmx, size)
+        synchronized(ptmxLock) {
+            if (ptmx < 0) return
+            RishConfig.ensureLibraryLoaded()
+            setWindowSize(ptmx, size)
+        }
+    }
+
+    private fun closePtmx() {
+        synchronized(ptmxLock) {
+            if (ptmx < 0) return
+            try {
+                ParcelFileDescriptor.adoptFd(ptmx).close()
+            } catch (e: IOException) {
+                Log.w(TAG, "close ptmx", e)
+            }
+            ptmx = -1
+        }
     }
 
     companion object {

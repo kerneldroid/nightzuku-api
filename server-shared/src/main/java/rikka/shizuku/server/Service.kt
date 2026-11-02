@@ -1,3 +1,10 @@
+/*
+ * Copyright (c) 2021 RikkaW
+ * Portions adapted from d4rken-org/porter-api (PorterCore) under Apache-2.0 / MIT:
+ * - Self-referential binder guard in transactRemote (rejecting local Binder instances and server descriptors)
+ * - Framework ClassLoader confinement for untrusted incoming Bundles
+ */
+
 package rikka.shizuku.server
 
 import android.os.Binder
@@ -11,6 +18,7 @@ import android.system.Os
 import androidx.annotation.CallSuper
 import java.io.File
 import java.io.IOException
+import kerneldroid.nightzuku.api.NightProtocol
 import moe.shizuku.server.IRemoteProcess
 import moe.shizuku.server.IShizukuService
 import moe.shizuku.server.IShizukuServiceConnection
@@ -106,11 +114,30 @@ abstract class Service<
         }
     }
 
+    protected open fun validateRemoteTransactTarget(targetBinder: IBinder?) {
+        if (targetBinder == null) {
+            throw IllegalArgumentException("Target binder cannot be null")
+        }
+        if (targetBinder === this || targetBinder is Binder) {
+            throw SecurityException("Permission Denial: transactRemote targets a local binder of the server process")
+        }
+        val descriptor = try {
+            targetBinder.interfaceDescriptor
+        } catch (_: Throwable) {
+            null
+        }
+        if (descriptor == ShizukuApiConstants.BINDER_DESCRIPTOR || descriptor == NightProtocol.DESCRIPTOR) {
+            throw SecurityException("Forwarding transactions to privileged server interface ($descriptor) is forbidden")
+        }
+    }
+
     @Throws(RemoteException::class)
     fun transactRemote(data: Parcel, reply: Parcel?, flags: Int) {
         enforceCallingPermission("transactRemote")
 
         val targetBinder = data.readStrongBinder()
+        validateRemoteTransactTarget(targetBinder)
+
         val targetCode = data.readInt()
         val callingUid = Binder.getCallingUid()
         val callingPid = Binder.getCallingPid()
@@ -124,8 +151,8 @@ abstract class Service<
 
         LOGGER.d(
             "transact: uid=%d, descriptor=%s, code=%d",
-            Binder.getCallingUid(),
-            targetBinder.interfaceDescriptor,
+            callingUid,
+            runCatching { targetBinder.interfaceDescriptor }.getOrDefault("<unavailable>"),
             targetCode
         )
         val newData = Parcel.obtain()
@@ -192,11 +219,13 @@ abstract class Service<
 
     override fun removeUserService(conn: IShizukuServiceConnection?, options: Bundle): Int {
         enforceCallingPermission("removeUserService")
+        options.classLoader = Bundle::class.java.classLoader
         return userServiceManager.removeUserService(conn, options)
     }
 
     override fun addUserService(conn: IShizukuServiceConnection?, options: Bundle): Int {
         enforceCallingPermission("addUserService")
+        options.classLoader = Bundle::class.java.classLoader
 
         val callingUid = Binder.getCallingUid()
         val callingPid = Binder.getCallingPid()
@@ -206,6 +235,7 @@ abstract class Service<
     }
 
     override fun attachUserService(binder: IBinder, options: Bundle) {
+        options.classLoader = Bundle::class.java.classLoader
         userServiceManager.attachUserService(binder, options)
     }
 
@@ -288,6 +318,11 @@ abstract class Service<
         val token = clientRecord?.client?.asBinder()
 
         return RemoteProcessHolder(process, token)
+    }
+
+    @Throws(RemoteException::class)
+    fun onTransactRish(code: Int, data: Parcel, reply: Parcel?, flags: Int): Boolean {
+        return rishService.onTransact(code, data, reply, flags)
     }
 
     @CallSuper

@@ -46,7 +46,7 @@ object UserService {
             return null
         }
 
-        val userId = uid / 100000
+        val userId = if (uid >= 0) uid / 100000 else 0
         Log.i(tag, String.format("starting service %s/%s...", pkg, cls))
 
         val service: IBinder = try {
@@ -68,60 +68,70 @@ object UserService {
                 Context.CONTEXT_INCLUDE_CODE or Context.CONTEXT_IGNORE_SECURITY,
                 userHandle
             )
-            val mPackageInfo = context.javaClass.getDeclaredField("mPackageInfo").apply {
-                isAccessible = true
-            }
-            val loadedApk = mPackageInfo.get(context)!!
 
+            var application: Application? = null
             try {
-                val appBindDataClass = Class.forName("android.app.ActivityThread\$AppBindData")
-                val appBindDataCtor = appBindDataClass.getDeclaredConstructor().apply {
+                val mPackageInfo = context.javaClass.getDeclaredField("mPackageInfo").apply {
                     isAccessible = true
                 }
-                val appBindData = appBindDataCtor.newInstance()
-
-                setAppBindDataField(appBindDataClass, appBindData, "processName", processName)
-
-                val appInfo = try {
-                    loadedApk.javaClass.getMethod("getApplicationInfo").invoke(loadedApk)
-                } catch (_: Throwable) {
-                    try {
-                        loadedApk.javaClass.getDeclaredField("mApplicationInfo").apply {
-                            isAccessible = true
-                        }.get(loadedApk)
-                    } catch (_: Throwable) {
-                        null
-                    }
-                }
-                setAppBindDataField(appBindDataClass, appBindData, "appInfo", appInfo)
+                val loadedApk = mPackageInfo.get(context)!!
 
                 try {
-                    val compatInfo = Class.forName("android.content.res.CompatibilityInfo")
-                        .getField("DEFAULT_COMPATIBILITY_INFO")
-                        .get(null)
-                    setAppBindDataField(appBindDataClass, appBindData, "compatInfo", compatInfo)
+                    val appBindDataClass = Class.forName("android.app.ActivityThread\$AppBindData")
+                    val appBindDataCtor = appBindDataClass.getDeclaredConstructor().apply {
+                        isAccessible = true
+                    }
+                    val appBindData = appBindDataCtor.newInstance()
+
+                    setAppBindDataField(appBindDataClass, appBindData, "processName", processName)
+
+                    val appInfo = try {
+                        loadedApk.javaClass.getMethod("getApplicationInfo").invoke(loadedApk)
+                    } catch (_: Throwable) {
+                        try {
+                            loadedApk.javaClass.getDeclaredField("mApplicationInfo").apply {
+                                isAccessible = true
+                            }.get(loadedApk)
+                        } catch (_: Throwable) {
+                            null
+                        }
+                    }
+                    setAppBindDataField(appBindDataClass, appBindData, "appInfo", appInfo)
+
+                    try {
+                        val compatInfo = Class.forName("android.content.res.CompatibilityInfo")
+                            .getField("DEFAULT_COMPATIBILITY_INFO")
+                            .get(null)
+                        setAppBindDataField(appBindDataClass, appBindData, "compatInfo", compatInfo)
+                    } catch (_: Throwable) {
+                    }
+
+                    activityThread.javaClass.getDeclaredField("mBoundApplication").apply {
+                        isAccessible = true
+                        set(activityThread, appBindData)
+                    }
                 } catch (_: Throwable) {
                 }
 
-                activityThread.javaClass.getDeclaredField("mBoundApplication").apply {
-                    isAccessible = true
-                    set(activityThread, appBindData)
+                val makeApplication = loadedApk.javaClass.getDeclaredMethod(
+                    "makeApplication",
+                    Boolean::class.javaPrimitiveType,
+                    Instrumentation::class.java
+                )
+                application = makeApplication.invoke(loadedApk, true, null) as? Application
+                if (application != null) {
+                    activityThread.javaClass.getDeclaredField("mInitialApplication").apply {
+                        isAccessible = true
+                        set(activityThread, application)
+                    }
                 }
-            } catch (_: Throwable) {
+            } catch (e: Throwable) {
+                Log.w(tag, "Failed to initialize Application, falling back to package Context", e)
+                application = null
             }
 
-            val makeApplication = loadedApk.javaClass.getDeclaredMethod(
-                "makeApplication",
-                Boolean::class.javaPrimitiveType,
-                Instrumentation::class.java
-            )
-            val application = makeApplication.invoke(loadedApk, true, null) as Application
-            activityThread.javaClass.getDeclaredField("mInitialApplication").apply {
-                isAccessible = true
-                set(activityThread, application)
-            }
-
-            val classLoader = application.classLoader
+            val hostContext: Context = application ?: context
+            val classLoader = hostContext.classLoader
             val serviceClass = classLoader.loadClass(cls)
             var constructorWithContext: Constructor<*>? = null
             try {
@@ -131,7 +141,7 @@ object UserService {
             }
 
             if (constructorWithContext != null) {
-                constructorWithContext.newInstance(application) as IBinder
+                constructorWithContext.newInstance(hostContext) as IBinder
             } else {
                 serviceClass.getDeclaredConstructor().newInstance() as IBinder
             }

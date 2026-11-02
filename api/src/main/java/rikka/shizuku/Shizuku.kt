@@ -13,6 +13,7 @@ import android.util.Log
 import androidx.annotation.RestrictTo
 import androidx.annotation.RestrictTo.Scope.LIBRARY_GROUP_PREFIX
 import java.util.Objects
+import kerneldroid.nightzuku.api.NightClient
 import moe.shizuku.server.IShizukuApplication
 import moe.shizuku.server.IShizukuService
 import rikka.shizuku.ShizukuApiConstants.ATTACH_APPLICATION_API_VERSION
@@ -192,11 +193,18 @@ open class Shizuku protected constructor() {
         }
 
         @JvmStatic
+        @Synchronized
         @RestrictTo(LIBRARY_GROUP_PREFIX)
         fun onBinderReceived(newBinder: IBinder?, packageName: String?) {
             if (binder === newBinder) return
 
             if (newBinder == null) {
+                binder?.let { old ->
+                    try {
+                        old.unlinkToDeath(DEATH_RECIPIENT, 0)
+                    } catch (_: Throwable) {
+                    }
+                }
                 binder = null
                 service = null
                 serverUid = -1
@@ -250,7 +258,12 @@ open class Shizuku protected constructor() {
             sticky: Boolean,
             handler: Handler?
         ) {
-            if (sticky && binderReady) {
+            val shouldNotifyNow: Boolean
+            synchronized(RECEIVED_LISTENERS) {
+                RECEIVED_LISTENERS.add(ListenerHolder(listener, handler))
+                shouldNotifyNow = sticky && binderReady && binder?.pingBinder() == true
+            }
+            if (shouldNotifyNow) {
                 if (handler != null) {
                     handler.post { listener.onBinderReceived() }
                 } else if (Looper.myLooper() == Looper.getMainLooper()) {
@@ -258,9 +271,6 @@ open class Shizuku protected constructor() {
                 } else {
                     MAIN_HANDLER.post { listener.onBinderReceived() }
                 }
-            }
-            synchronized(RECEIVED_LISTENERS) {
-                RECEIVED_LISTENERS.add(ListenerHolder(listener, handler))
             }
         }
 
@@ -272,18 +282,20 @@ open class Shizuku protected constructor() {
         }
 
         private fun scheduleBinderReceivedListeners() {
+            val snapshot: List<ListenerHolder<OnBinderReceivedListener>>
             synchronized(RECEIVED_LISTENERS) {
-                for (holder in RECEIVED_LISTENERS) {
-                    if (holder.handler != null) {
-                        holder.handler.post { holder.listener.onBinderReceived() }
-                    } else if (Looper.myLooper() == Looper.getMainLooper()) {
-                        holder.listener.onBinderReceived()
-                    } else {
-                        MAIN_HANDLER.post { holder.listener.onBinderReceived() }
-                    }
+                binderReady = true
+                snapshot = ArrayList(RECEIVED_LISTENERS)
+            }
+            for (holder in snapshot) {
+                if (holder.handler != null) {
+                    holder.handler.post { holder.listener.onBinderReceived() }
+                } else if (Looper.myLooper() == Looper.getMainLooper()) {
+                    holder.listener.onBinderReceived()
+                } else {
+                    MAIN_HANDLER.post { holder.listener.onBinderReceived() }
                 }
             }
-            binderReady = true
         }
 
         @JvmStatic
@@ -302,15 +314,14 @@ open class Shizuku protected constructor() {
         }
 
         private fun scheduleBinderDeadListeners() {
-            synchronized(RECEIVED_LISTENERS) {
-                for (holder in DEAD_LISTENERS) {
-                    if (holder.handler != null) {
-                        holder.handler.post { holder.listener.onBinderDead() }
-                    } else if (Looper.myLooper() == Looper.getMainLooper()) {
-                        holder.listener.onBinderDead()
-                    } else {
-                        MAIN_HANDLER.post { holder.listener.onBinderDead() }
-                    }
+            val snapshot = synchronized(RECEIVED_LISTENERS) { ArrayList(DEAD_LISTENERS) }
+            for (holder in snapshot) {
+                if (holder.handler != null) {
+                    holder.handler.post { holder.listener.onBinderDead() }
+                } else if (Looper.myLooper() == Looper.getMainLooper()) {
+                    holder.listener.onBinderDead()
+                } else {
+                    MAIN_HANDLER.post { holder.listener.onBinderDead() }
                 }
             }
         }
@@ -334,15 +345,14 @@ open class Shizuku protected constructor() {
         }
 
         private fun scheduleRequestPermissionResultListener(requestCode: Int, result: Int) {
-            synchronized(RECEIVED_LISTENERS) {
-                for (holder in PERMISSION_LISTENERS) {
-                    if (holder.handler != null) {
-                        holder.handler.post { holder.listener.onRequestPermissionResult(requestCode, result) }
-                    } else if (Looper.myLooper() == Looper.getMainLooper()) {
-                        holder.listener.onRequestPermissionResult(requestCode, result)
-                    } else {
-                        MAIN_HANDLER.post { holder.listener.onRequestPermissionResult(requestCode, result) }
-                    }
+            val snapshot = synchronized(RECEIVED_LISTENERS) { ArrayList(PERMISSION_LISTENERS) }
+            for (holder in snapshot) {
+                if (holder.handler != null) {
+                    holder.handler.post { holder.listener.onRequestPermissionResult(requestCode, result) }
+                } else if (Looper.myLooper() == Looper.getMainLooper()) {
+                    holder.listener.onRequestPermissionResult(requestCode, result)
+                } else {
+                    MAIN_HANDLER.post { holder.listener.onRequestPermissionResult(requestCode, result) }
                 }
             }
         }
@@ -353,7 +363,7 @@ open class Shizuku protected constructor() {
         }
 
         @JvmStatic
-        fun getBinder(): IBinder? = binder
+        fun getBinder(): IBinder? = binder ?: NightClient.getBinder()
 
         @JvmStatic
         fun pingBinder(): Boolean = binder?.pingBinder() == true
@@ -376,6 +386,9 @@ open class Shizuku protected constructor() {
 
         @JvmStatic
         fun newProcess(cmd: Array<String>, env: Array<String>?, dir: String?): ShizukuRemoteProcess {
+            if (!pingBinder() && NightClient.pingBinder()) {
+                return NightClient.newProcess(cmd, env, dir)
+            }
             return try {
                 ShizukuRemoteProcess(requireService().newProcess(cmd, env, dir))
             } catch (e: RemoteException) {
@@ -386,6 +399,7 @@ open class Shizuku protected constructor() {
         @JvmStatic
         fun getUid(): Int {
             if (serverUid != -1) return serverUid
+            if (!pingBinder() && NightClient.pingBinder()) return NightClient.getUid()
             return try {
                 serverUid = requireService().uid
                 serverUid
@@ -399,6 +413,7 @@ open class Shizuku protected constructor() {
         @JvmStatic
         fun getVersion(): Int {
             if (serverApiVersion != -1) return serverApiVersion
+            if (!pingBinder() && NightClient.pingBinder()) return NightClient.getVersion()
             return try {
                 serverApiVersion = requireService().version
                 serverApiVersion
@@ -418,6 +433,7 @@ open class Shizuku protected constructor() {
         @JvmStatic
         fun getSELinuxContext(): String? {
             if (serverContext != null) return serverContext
+            if (!pingBinder() && NightClient.pingBinder()) return NightClient.getSELinuxContext()
             return try {
                 serverContext = requireService().seLinuxContext
                 serverContext
@@ -430,6 +446,10 @@ open class Shizuku protected constructor() {
 
         @JvmStatic
         fun bindUserService(args: UserServiceArgs, conn: ServiceConnection) {
+            if (!pingBinder() && NightClient.pingBinder()) {
+                NightClient.bindUserService(args, conn)
+                return
+            }
             val connection = ShizukuServiceConnections.get(args)
             connection.addConnection(conn)
             try {
@@ -441,6 +461,9 @@ open class Shizuku protected constructor() {
 
         @JvmStatic
         fun peekUserService(args: UserServiceArgs, conn: ServiceConnection): Int {
+            if (!pingBinder() && NightClient.pingBinder()) {
+                return NightClient.peekUserService(args, conn)
+            }
             val connection = ShizukuServiceConnections.get(args)
             connection.addConnection(conn)
             val result = try {
@@ -460,6 +483,10 @@ open class Shizuku protected constructor() {
 
         @JvmStatic
         fun unbindUserService(args: UserServiceArgs, conn: ServiceConnection?, remove: Boolean) {
+            if (!pingBinder() && NightClient.pingBinder()) {
+                NightClient.unbindUserService(args, conn, remove)
+                return
+            }
             if (remove) {
                 try {
                     requireService().removeUserService(null, args.forRemove(true))
@@ -468,6 +495,15 @@ open class Shizuku protected constructor() {
                 }
             } else {
                 val connection = ShizukuServiceConnections.get(args)
+                if (conn != null) {
+                    connection.removeConnection(conn)
+                    if (connection.hasConnections()) {
+                        return
+                    }
+                } else {
+                    connection.clearConnections()
+                }
+                ShizukuServiceConnections.remove(connection)
                 if (getVersion() >= 14 || (getVersion() == 13 && getServerPatchVersion() >= 4)) {
                     try {
                         requireService().removeUserService(connection, args.forRemove(false))
@@ -475,8 +511,6 @@ open class Shizuku protected constructor() {
                         throw rethrowAsRuntimeException(e)
                     }
                 }
-                connection.clearConnections()
-                ShizukuServiceConnections.remove(connection)
             }
         }
 
@@ -492,6 +526,10 @@ open class Shizuku protected constructor() {
 
         @JvmStatic
         fun requestPermission(requestCode: Int) {
+            if (!pingBinder() && NightClient.pingBinder()) {
+                NightClient.requestPermission(requestCode)
+                return
+            }
             try {
                 requireService().requestPermission(requestCode)
             } catch (e: RemoteException) {
@@ -502,6 +540,9 @@ open class Shizuku protected constructor() {
         @JvmStatic
         fun checkSelfPermission(): Int {
             if (permissionGranted) return PackageManager.PERMISSION_GRANTED
+            if (!pingBinder() && NightClient.pingBinder()) {
+                return NightClient.checkSelfPermission()
+            }
             try {
                 permissionGranted = requireService().checkSelfPermission()
             } catch (e: RemoteException) {
@@ -514,6 +555,9 @@ open class Shizuku protected constructor() {
         fun shouldShowRequestPermissionRationale(): Boolean {
             if (permissionGranted) return false
             if (shouldShowRequestPermissionRationale) return true
+            if (!pingBinder() && NightClient.pingBinder()) {
+                return NightClient.shouldShowRequestPermissionRationale()
+            }
             try {
                 shouldShowRequestPermissionRationale = requireService().shouldShowRequestPermissionRationale()
             } catch (e: RemoteException) {
