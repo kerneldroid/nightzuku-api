@@ -21,7 +21,39 @@ Kotlin-first IPC protocol, client SDK, dual-wire `ContentProvider`, Rust-powered
 3. **Rust `setsid` Process-Group Spawner (`nativeSpawnGroup`)**: `librish.so` exports `RishHost.nativeSpawnGroup(cmd, env, dir)` which `fork()`s, calls `libc::setsid()` (`pgid == pid`), attaches `O_CLOEXEC` stdio pipes, and enables instant process-tree termination via `Os.kill(-pid, OsConstants.SIGKILL)`.
 4. **Kernel `callingUid` Guard & Binder-Free Multi-Process Broadcast**: `ShizukuProvider.call()` enforces `callingUid in {0, 2000, Process.myUid()}` before accepting or serving binders, and `enableMultiProcess` sends an empty broadcast signal so secondary processes always pull the binder from their own verified provider authority.
 5. **Lock-Free `NightSession` Snapshot & `NightDiagnostics`**: `NightClient` stores an immutable `NightSession` inside `AtomicReference<NightSession?>` and reports protocol version mismatches explicitly via `NightDiagnostics.Incompatible(clientVersion, serverVersion, serverMinVersion, status)`.
-6. **Hardened `UserServiceManager` & R8 Consumer Rules**: `UserServiceManager` closes `sh` stdout/stderr streams, enforces a 15-second launch timeout, checks `isCallerStillAllowed` inside `synchronized(this)` before record creation, and ships `api/consumer-rules.pro` to preserve `IBinder` service constructors under R8.
+6. **Hardened `UserServiceManager` & R8 Consumer Rules**: `UserServiceManager` closes `sh` stdout/stderr streams, enforces a 15-second launch timeout, and checks `isCallerStillAllowed` inside `synchronized(this)` before record creation. `provider` keeps the reflective `BinderContainer` Parcelable, and `rish` keeps its JNI method names for `librish.so`.
+
+## Maven
+
+Published artifacts use the `io.github.kerneldroid` group on Maven Central.
+
+```kotlin
+repositories {
+    mavenCentral()
+}
+
+dependencies {
+    // Native NightClient + legacy Shizuku compatibility (pulls :aidl and :shared)
+    implementation("io.github.kerneldroid:api:13.2.1")
+
+    // Dual-wire ContentProvider (pulls :api)
+    implementation("io.github.kerneldroid:provider:13.2.1")
+
+    // rish PTY / process-group bridge with prebuilt librish.so
+    implementation("io.github.kerneldroid:rish:13.2.1")
+}
+```
+
+`aidl` and `shared` are published as transitive dependencies; declare them
+explicitly only when you need the raw wire types without `:api`.
+
+For local development, publish the current working tree into `~/.m2`:
+
+```bash
+./gradlew publishToMavenLocal
+```
+
+The same coordinates then resolve from `mavenLocal()` without a Central release.
 
 ## Building
 

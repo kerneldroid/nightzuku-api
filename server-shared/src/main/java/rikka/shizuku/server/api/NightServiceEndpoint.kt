@@ -39,6 +39,8 @@ open class NightServiceEndpoint(
     private val service: NightServerHost
 ) : Binder() {
 
+    private data class ExecCallKey(val uid: Int, val pid: Int, val callId: Long)
+
     private class ActiveExecHandle(
         val callId: Long,
         val callingUid: Int,
@@ -71,7 +73,7 @@ open class NightServiceEndpoint(
     private val nightCallbacks = ConcurrentHashMap<Int, IBinder>()
     private val nightCallbackDeaths = ConcurrentHashMap<Int, IBinder.DeathRecipient>()
     private val callbackUids = ConcurrentHashMap<Int, Int>()
-    private val activeExecCalls = ConcurrentHashMap<Long, ActiveExecHandle>()
+    private val activeExecCalls = ConcurrentHashMap<ExecCallKey, ActiveExecHandle>()
     private val execPool = Executors.newCachedThreadPool { r ->
         Thread(r, "night-exec").apply { isDaemon = true }
     }
@@ -383,9 +385,9 @@ open class NightServiceEndpoint(
     }
 
     private fun cancelActiveExecCallsForPid(pid: Int) {
-        for ((callId, handle) in ArrayList(activeExecCalls.entries)) {
+        for ((key, handle) in ArrayList(activeExecCalls.entries)) {
             if (handle.callingPid == pid) {
-                activeExecCalls.remove(callId, handle)
+                activeExecCalls.remove(key, handle)
                 handle.terminate(fromClientDeath = true)
             }
         }
@@ -831,8 +833,9 @@ open class NightServiceEndpoint(
             return
         }
 
+        val callKey = ExecCallKey(callingUid, callingPid, callId)
         val handle = ActiveExecHandle(callId, callingUid, callingPid)
-        activeExecCalls[callId] = handle
+        activeExecCalls[callKey] = handle
 
         execPool.execute {
             try {
@@ -848,21 +851,43 @@ open class NightServiceEndpoint(
                     notifyExecResult(callingPid, callId, exitCode, false, ByteArray(0), errBytes)
                 }
             } finally {
-                activeExecCalls.remove(callId, handle)
+                activeExecCalls.remove(callKey, handle)
             }
         }
+    }
+
+    /**
+     * Finds an in-flight exec call scoped to the calling client. Call IDs are generated per
+     * client process, so the same callId may exist concurrently for different clients.
+     */
+    private fun findExecCall(
+        callingUid: Int,
+        callingPid: Int,
+        callId: Long,
+        isManager: Boolean
+    ): Pair<ExecCallKey, ActiveExecHandle>? {
+        if (callingPid > 0) {
+            val key = ExecCallKey(callingUid, callingPid, callId)
+            activeExecCalls[key]?.let { return key to it }
+        }
+        val matches = activeExecCalls.entries.filter { entry ->
+            entry.key.callId == callId && (isManager || entry.key.uid == callingUid)
+        }
+        return matches.singleOrNull()?.let { it.key to it.value }
     }
 
     private fun handleCancelExec(data: Parcel) {
         val callingUid = Binder.getCallingUid()
         val callId = data.readLong()
-        val handle = activeExecCalls[callId] ?: return
-        if (handle.callingUid != callingUid &&
-            !service.checkCallerManagerPermission("cancelExec", callingUid, handle.callingPid)
-        ) {
+        val reportedPid = if (data.dataAvail() >= 4) data.readInt() else 0
+        val callingPid = resolveOnewayCallingPid(reportedPid, callingUid)
+        val isManager = service.checkCallerManagerPermission("cancelExec", callingUid, callingPid)
+        val entry = findExecCall(callingUid, callingPid, callId, isManager) ?: return
+        val (key, handle) = entry
+        if (handle.callingUid != callingUid && !isManager) {
             throw SecurityException("Cannot cancel execAsync callId=$callId owned by uid=${handle.callingUid}")
         }
-        activeExecCalls.remove(callId, handle)
+        activeExecCalls.remove(key, handle)
         handle.terminate(fromClientDeath = false)
         if (handle.notified.compareAndSet(false, true)) {
             val errBytes = "Command execution cancelled".toByteArray(StandardCharsets.UTF_8)

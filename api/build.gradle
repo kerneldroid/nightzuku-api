@@ -5,7 +5,6 @@ plugins {
 android {
     namespace 'rikka.shizuku.api'
     defaultConfig {
-        consumerProguardFiles 'consumer-rules.pro'
     }
     buildFeatures {
         buildConfig = false

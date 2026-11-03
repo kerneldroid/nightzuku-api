@@ -175,6 +175,53 @@ class ServerCycleTest {
     }
 
     @Test
+    fun `execAsync call ids are scoped per client`() {
+        val otherCallback = ExecCallback()
+        server.clientManager.grantOneTimeAccess(OTHER_UID)
+
+        ShadowBinder.setCallingUid(CALLING_UID)
+        ShadowBinder.setCallingPid(CALLING_PID)
+        attach(callback).recycle()
+        transact(NightProtocol.TRANSACTION_EXEC_ASYNC) { data ->
+            data.writeLong(CALL_ID)
+            data.writeStringArray(DELAYED_ECHO_COMMAND)
+            data.writeStringArray(null)
+            data.writeString(null)
+            data.writeLong(NightProtocol.EXEC_FAST_DEFAULT_TIMEOUT_MS)
+            data.writeInt(CALLING_PID)
+        }.recycle()
+
+        ShadowBinder.setCallingUid(OTHER_UID)
+        ShadowBinder.setCallingPid(OTHER_PID)
+        attach(otherCallback).recycle()
+        transact(NightProtocol.TRANSACTION_EXEC_ASYNC) { data ->
+            data.writeLong(CALL_ID)
+            data.writeStringArray(SLEEPING_COMMAND)
+            data.writeStringArray(null)
+            data.writeString(null)
+            data.writeLong(NightProtocol.EXEC_FAST_DEFAULT_TIMEOUT_MS)
+            data.writeInt(OTHER_PID)
+        }.recycle()
+
+        transact(NightProtocol.TRANSACTION_CANCEL_EXEC) { data ->
+            data.writeLong(CALL_ID)
+            data.writeInt(OTHER_PID)
+        }.recycle()
+
+        val cancelled = otherCallback.results.poll(5, TimeUnit.SECONDS)
+        assertNotNull(cancelled)
+        assertEquals(CALL_ID, cancelled!!.callId)
+        assertEquals(137, cancelled.exitCode)
+
+        val survivor = callback.results.poll(10, TimeUnit.SECONDS)
+        assertNotNull(survivor)
+        assertEquals(CALL_ID, survivor!!.callId)
+        assertEquals(0, survivor.exitCode)
+        assertEquals("A\n", String(survivor.stdout, Charsets.UTF_8))
+        assertTrue(otherCallback.results.isEmpty())
+    }
+
+    @Test
     fun `cancelExec stops an in-flight async command and reports cancellation`() {
         attach().recycle()
 
@@ -199,9 +246,9 @@ class ServerCycleTest {
         assertEquals("Command execution cancelled", String(result.stderr, Charsets.UTF_8))
     }
 
-    private fun attach(): Parcel =
+    private fun attach(cb: Binder = callback): Parcel =
         transact(NightProtocol.TRANSACTION_ATTACH) { data ->
-            data.writeStrongBinder(callback)
+            data.writeStrongBinder(cb)
             data.writeInt(NightProtocol.PROTOCOL_VERSION)
             data.writeString(PACKAGE_NAME)
         }
@@ -263,10 +310,13 @@ class ServerCycleTest {
     companion object {
         private const val CALLING_UID = 10_234
         private const val CALLING_PID = 4_242
+        private const val OTHER_UID = 20_468
+        private const val OTHER_PID = 8_484
         private const val PACKAGE_NAME = "com.example.client"
         private const val CALL_ID = 41L
 
         private val ECHO_COMMAND = arrayOf("/bin/sh", "-c", "echo nightzuku")
         private val SLEEPING_COMMAND = arrayOf("/bin/sh", "-c", "sleep 30")
+        private val DELAYED_ECHO_COMMAND = arrayOf("/bin/sh", "-c", "sleep 1; echo A")
     }
 }

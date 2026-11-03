@@ -3,7 +3,7 @@ apply from: 'manifest.gradle'
 subprojects {
     // Keep every module in the kerneldroid.nightzuku library group so that
     // @RestrictTo(LIBRARY_GROUP_PREFIX) constants remain usable across modules.
-    group = "kerneldroid.nightzuku"
+    group = "io.github.kerneldroid"
 
     plugins.withId("com.android.base") {
         android {
@@ -84,7 +84,7 @@ tasks.register('clean', Delete) {
 }
 
 ext {
-    groupIdBase = "kerneldroid.nightzuku"
+    groupIdBase = "io.github.kerneldroid"
 
     POM_INCEPTION_YEAR = "2026"
     POM_PACKAGING = "aar"

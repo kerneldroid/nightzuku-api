@@ -698,6 +698,7 @@ object NightClient {
             try {
                 data.writeInterfaceToken(NightProtocol.DESCRIPTOR)
                 data.writeLong(callId)
+                data.writeInt(Process.myPid())
                 current.transact(NightProtocol.TRANSACTION_CANCEL_EXEC, data, null, IBinder.FLAG_ONEWAY)
             } catch (_: Throwable) {
             } finally {
