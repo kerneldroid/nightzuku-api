@@ -41,3 +41,12 @@ abstract class ConfigManager {
         const val MASK_PERMISSION: Int = FLAG_ALLOWED or FLAG_DENIED
     }
 }
+
+/**
+ * Whether client access is globally paused.
+ *
+ * [ConfigManager] implementations that support the access-control surface implement
+ * [ConfigManager.ClientAccessVerifier]; for every other manager access is never considered paused.
+ */
+fun ConfigManager.isAccessPaused(): Boolean =
+    (this as? ConfigManager.ClientAccessVerifier)?.isAccessPaused() ?: false

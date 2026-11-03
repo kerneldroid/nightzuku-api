@@ -16,7 +16,7 @@ class JsonConfigPackageEntry(
     var uid: Int = 0,
     @SerializedName("flags")
     var flags: Int = 0
-) : ConfigPackageEntry() {
+) : ConfigPackageEntry(), ConfigFlagsEntry {
 
     @SerializedName("packages")
     var packages: MutableList<String>? = ArrayList()
@@ -37,6 +37,8 @@ class JsonConfigPackageEntry(
     override fun isAllowed(): Boolean = (flags and ConfigManager.FLAG_ALLOWED) != 0
 
     override fun isDenied(): Boolean = (flags and ConfigManager.FLAG_DENIED) != 0
+
+    override fun capabilityFlags(): Int = flags
 
     /** Capability bits currently granted to this UID. */
     val capabilities: Int

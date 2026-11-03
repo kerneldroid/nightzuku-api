@@ -55,6 +55,14 @@ open class ClientManager<ConfigMgr : ConfigManager>(
         }
     }
 
+    /**
+     * Immutable snapshot of every attached client record.
+     *
+     * Unlike the deployment-specific `getActiveClients()` of embedding managers this is a plain
+     * snapshot: it performs no liveness filtering and is safe to call from any thread.
+     */
+    fun allClients(): List<ClientRecord> = snapshotClients()
+
     @JvmOverloads
     fun requireClient(callingUid: Int, callingPid: Int, requiresPermission: Boolean = false): ClientRecord {
         val clientRecord = findClient(callingUid, callingPid)
