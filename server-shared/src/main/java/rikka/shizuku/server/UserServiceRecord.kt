@@ -19,6 +19,7 @@ import rikka.shizuku.ShizukuApiConstants.USER_SERVICE_TRANSACTION_destroy
 import rikka.shizuku.server.util.HandlerUtil
 import rikka.shizuku.server.util.HostProcess
 import rikka.shizuku.server.util.Logger
+import rikka.shizuku.server.util.PackageSignatureVerifier
 
 abstract class UserServiceRecord(
     @JvmField val versionCode: Int,
@@ -72,6 +73,13 @@ abstract class UserServiceRecord(
 
     @JvmField
     var ownerUid: Int = -1
+
+    /**
+     * Signing identity of the package installation this record was created for. Used by the
+     * manager to refuse reusing a record after the APK was replaced with a different signer.
+     */
+    @Volatile
+    internal var signingBaseline: PackageSignatureVerifier.Baseline? = null
 
     @Volatile
     private var cachedInterfaceDescriptor: String? = null
