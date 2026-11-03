@@ -632,6 +632,16 @@ abstract class UserServiceManager {
     /** UID that owns [record], captured when the record was created. */
     fun recordUid(record: UserServiceRecord): Int = record.ownerUid
 
+    /**
+     * Signing baseline pinned for [record] when it was created, or `null` when the package had no
+     * verifiable signing certificates.
+     *
+     * Embedding managers read this instead of keeping a second baseline map: the record is the
+     * single owner of the per-service identity state.
+     */
+    fun recordSigningBaseline(record: UserServiceRecord): PackageSignatureVerifier.Baseline? =
+        record.signingBaseline
+
     /** Whether all client access is administratively paused. */
     fun isAccessPaused(): Boolean = accessPaused
 

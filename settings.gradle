@@ -36,4 +36,4 @@ dependencyResolutionManagement {
 
 rootProject.name = "nightzuku-api"
 
-include ':aidl', ':shared', ':api', ':provider', ':rish', ':server-shared'
+include ':aidl', ':shared', ':api', ':provider', ':rish', ':server-shared', ':server'

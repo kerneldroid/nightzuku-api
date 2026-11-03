@@ -407,8 +407,16 @@ abstract class Service<
     }
 
     override fun requestPermission(requestCode: Int) {
-        val callingUid = Binder.getCallingUid()
-        val callingPid = Binder.getCallingPid()
+        requestPermissionFor(Binder.getCallingUid(), Binder.getCallingPid(), requestCode)
+    }
+
+    /**
+     * Opens a permission prompt for an explicitly identified process.
+     *
+     * [requestPermission] forwards the current Binder caller here; the Night wire uses this entry
+     * point so both wires share one prompt ledger and one set of stale-reply checks.
+     */
+    protected fun requestPermissionFor(callingUid: Int, callingPid: Int, requestCode: Int) {
         val userId = UserHandleCompat.getUserId(callingUid)
 
         if (callingUid == OsUtils.getUid() || callingPid == OsUtils.getPid()) {

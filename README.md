@@ -12,6 +12,7 @@ Kotlin-first IPC protocol, client SDK, dual-wire `ContentProvider`, Rust-powered
 | `:provider` | `rikka.shizuku.provider` | Dual-wire `NightProvider` and `ShizukuProvider` with kernel `callingUid` validation and binder-free multi-process broadcast signaling. |
 | `:rish` | `rikka.rish` | Interactive PTY shell bridge (`Rish`, `RishHost`, `RishTerminal`, `RishService`, `RishConfig`) and `nativeSpawnGroup` (`setsid`) process-group spawner backed by `librish.so` (Rust Edition 2024 in `rust/rish`). |
 | `:server-shared` | `rikka.shizuku.server` | Privileged server abstractions (`Service`, `ClientManager`, `ConfigManager`, `UserServiceManager`, `UserService`, `RemoteProcessHolder`, `HostProcess`, `IContentProviderUtils`). |
+| `:server` | `rikka.shizuku.server.runtime` | Concrete `app_process` runtime: `NightzukuServerService.main`, `ServerStarter` UserService entrypoint, `ProviderBinderClient` binder publishing, `ServerConfig`, and deployment managers backed by `server-shared`. No Android application/UI. |
 
 ## Key Engineering Highlights
 

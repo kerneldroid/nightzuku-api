@@ -1,0 +1,36 @@
+plugins {
+    id('com.android.library')
+}
+
+android {
+    namespace 'rikka.shizuku.server.runtime'
+    buildFeatures {
+        buildConfig = false
+    }
+    buildTypes {
+        release {
+            minifyEnabled false
+        }
+    }
+    testOptions {
+        unitTests.includeAndroidResources = true
+    }
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_21
+        targetCompatibility JavaVersion.VERSION_21
+    }
+}
+
+dependencies {
+    api project(':server-shared')
+    api project(':api')
+    api project(':provider')
+    api project(':rish')
+
+    implementation libs.hidden.compat
+    compileOnly libs.hidden.stub
+    implementation libs.refine.runtime
+
+    testImplementation 'junit:junit:4.13.2'
+    testImplementation 'org.robolectric:robolectric:4.16.1'
+}
