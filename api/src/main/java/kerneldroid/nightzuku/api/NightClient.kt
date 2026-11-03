@@ -19,6 +19,7 @@ import android.os.IBinder
 import android.os.Looper
 import android.os.Parcel
 import android.os.ParcelFileDescriptor
+import android.os.Process
 import android.os.RemoteException
 import android.util.Log
 import java.nio.charset.StandardCharsets
@@ -643,6 +644,8 @@ object NightClient {
             data.writeStringArray(env)
             data.writeString(dir)
             data.writeLong(timeoutMs)
+            // Oneway binder transactions do not carry the sender PID, so include it explicitly.
+            data.writeInt(Process.myPid())
             val sent = current.transact(NightProtocol.TRANSACTION_EXEC_ASYNC, data, null, IBinder.FLAG_ONEWAY)
             if (!sent) {
                 pendingExecCalls.remove(callId)

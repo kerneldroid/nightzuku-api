@@ -65,6 +65,15 @@ interface NightServerHost {
 
     fun enforceCallingPermission(func: String)
 
+    /**
+     * Enforces the caller permission with an explicitly resolved PID. Oneway Binder
+     * transactions do not carry the sender PID, so the endpoint resolves it before checking.
+     * Hosts that do not implement the overload fall back to the regular permission check.
+     */
+    fun enforceCallingPermission(func: String, callingUid: Int, callingPid: Int) {
+        enforceCallingPermission(func)
+    }
+
     fun enforceManagerPermission(func: String)
 
     fun addUserService(conn: IShizukuServiceConnection?, options: Bundle): Int

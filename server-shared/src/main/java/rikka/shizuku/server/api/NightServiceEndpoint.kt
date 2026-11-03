@@ -70,6 +70,7 @@ open class NightServiceEndpoint(
     private val logger = Logger("NightEndpoint")
     private val nightCallbacks = ConcurrentHashMap<Int, IBinder>()
     private val nightCallbackDeaths = ConcurrentHashMap<Int, IBinder.DeathRecipient>()
+    private val callbackUids = ConcurrentHashMap<Int, Int>()
     private val activeExecCalls = ConcurrentHashMap<Long, ActiveExecHandle>()
     private val execPool = Executors.newCachedThreadPool { r ->
         Thread(r, "night-exec").apply { isDaemon = true }
@@ -391,6 +392,7 @@ open class NightServiceEndpoint(
     }
 
     private fun unlinkCallback(pid: Int) {
+        callbackUids.remove(pid)
         val oldBinder = nightCallbacks.remove(pid)
         val oldDeath = nightCallbackDeaths.remove(pid)
         if (oldBinder != null && oldDeath != null) {
@@ -436,6 +438,7 @@ open class NightServiceEndpoint(
                 if (nightCallbacks.remove(callingPid, callbackBinder)) {
                     nightCallbackDeaths.remove(callingPid)
                 }
+                callbackUids.remove(callingPid, callingUid)
                 cancelActiveExecCallsForPid(callingPid)
                 service.onClientProcessDied(callingUid, callingPid)
             }
@@ -443,9 +446,11 @@ open class NightServiceEndpoint(
                 callbackBinder.linkToDeath(recipient, 0)
                 nightCallbacks[callingPid] = callbackBinder
                 nightCallbackDeaths[callingPid] = recipient
+                callbackUids[callingPid] = callingUid
             } catch (_: RemoteException) {
                 nightCallbacks.remove(callingPid, callbackBinder)
                 nightCallbackDeaths.remove(callingPid, recipient)
+                callbackUids.remove(callingPid, callingUid)
             }
         }
 
@@ -771,17 +776,44 @@ open class NightServiceEndpoint(
         reply.writeByteArray(out.stderr)
     }
 
+
+    /**
+     * Oneway binder transactions report a sender PID of 0. Resolve the caller from the explicit
+     * PID hint sent by newer clients, or fall back to the unique registered callback for the UID.
+     * A PID hint is only honoured when it maps back to the calling UID.
+     */
+    private fun resolveOnewayCallingPid(reportedPid: Int, callingUid: Int): Int {
+        val binderPid = Binder.getCallingPid()
+        if (binderPid > 0) {
+            return binderPid
+        }
+        if (reportedPid > 0 && callbackUids[reportedPid] == callingUid) {
+            return reportedPid
+        }
+        var match = 0
+        for ((pid, uid) in callbackUids) {
+            if (uid == callingUid) {
+                if (match != 0) {
+                    return 0
+                }
+                match = pid
+            }
+        }
+        return match
+    }
+
     private fun handleExecAsync(data: Parcel) {
         val callingUid = Binder.getCallingUid()
-        val callingPid = Binder.getCallingPid()
         val callId = data.readLong()
         val cmd = data.createStringArray()
         val env = data.createStringArray()
         val dir = data.readString()
         val timeoutMs = data.readLong().coerceIn(100L, 300_000L)
+        val reportedPid = if (data.dataAvail() >= 4) data.readInt() else 0
+        val callingPid = resolveOnewayCallingPid(reportedPid, callingUid)
 
         try {
-            service.enforceCallingPermission("execAsync")
+            service.enforceCallingPermission("execAsync", callingUid, callingPid)
             TransactGuard.enforceCapability(
                 service.configManager,
                 callingUid,
@@ -826,7 +858,7 @@ open class NightServiceEndpoint(
         val callId = data.readLong()
         val handle = activeExecCalls[callId] ?: return
         if (handle.callingUid != callingUid &&
-            !service.checkCallerManagerPermission("cancelExec", callingUid, Binder.getCallingPid())
+            !service.checkCallerManagerPermission("cancelExec", callingUid, handle.callingPid)
         ) {
             throw SecurityException("Cannot cancel execAsync callId=$callId owned by uid=${handle.callingUid}")
         }

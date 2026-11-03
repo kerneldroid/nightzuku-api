@@ -425,7 +425,7 @@ class NightServiceEndpointTest {
         override fun capabilityFlags(): Int = rawFlags
     }
 
-    private class TestConfigManager : ConfigManager() {
+    private class TestConfigManager : ConfigManager(), ConfigManager.ClientAccessVerifier {
         private val entries = HashMap<Int, TestEntry>()
         var paused: Boolean = false
 
@@ -446,9 +446,9 @@ class NightServiceEndpointTest {
 
         override fun isAccessPaused(): Boolean = paused
 
-        override fun setAccessPaused(paused: Boolean) {
-            this.paused = paused
-        }
+        override fun verifyClientIdentity(uid: Int, packageName: String): Boolean = true
+
+        override fun recordConnection(uid: Int) = Unit
     }
 
     private object FakeRemoteProcess : IRemoteProcess.Stub() {

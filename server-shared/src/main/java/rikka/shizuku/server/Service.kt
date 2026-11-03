@@ -88,6 +88,18 @@ abstract class Service<
         return policy.verifyManagerSignature()
     }
 
+    /**
+     * Resolves a sender PID that Binder could not provide (oneway transactions report 0).
+     * Falls back to the only attached client for the UID when there is no ambiguity.
+     */
+    private fun resolveCallingPid(callingUid: Int, reportedPid: Int): Int {
+        if (reportedPid > 0) {
+            return reportedPid
+        }
+        val clients = clientManager.findClients(callingUid)
+        return if (clients.size == 1) clients[0].pid else 0
+    }
+
     fun enforceManagerPermission(func: String) {
         val callingUid = Binder.getCallingUid()
         val callingPid = Binder.getCallingPid()
@@ -113,8 +125,16 @@ abstract class Service<
     ): Boolean = false
 
     fun enforceCallingPermission(func: String) {
-        val callingUid = Binder.getCallingUid()
-        val callingPid = Binder.getCallingPid()
+        enforceCallingPermission(func, Binder.getCallingUid(), Binder.getCallingPid())
+    }
+
+    /**
+     * Enforces the caller permission using an explicitly resolved PID. Oneway Binder
+     * transactions do not carry the sender PID, so callers may resolve it from a validated
+     * hint and pass it here instead of relying on [Binder.getCallingPid].
+     */
+    open fun enforceCallingPermission(func: String, callingUid: Int, rawCallingPid: Int) {
+        val callingPid = resolveCallingPid(callingUid, rawCallingPid)
 
         if (callingUid == OsUtils.getUid()) {
             return

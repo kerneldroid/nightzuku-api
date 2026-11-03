@@ -12,7 +12,6 @@ import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
-import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Rule
@@ -135,7 +134,48 @@ class ServerCycleTest {
     }
 
     @Test
-    fun `cancelExec stops an in-flight async command without a result`() {
+    fun `execAsync resolves the callback when a oneway transaction reports no pid`() {
+        attach().recycle()
+        ShadowBinder.setCallingPid(0)
+
+        transact(NightProtocol.TRANSACTION_EXEC_ASYNC) { data ->
+            data.writeLong(CALL_ID)
+            data.writeStringArray(ECHO_COMMAND)
+            data.writeStringArray(null)
+            data.writeString(null)
+            data.writeLong(NightProtocol.EXEC_FAST_DEFAULT_TIMEOUT_MS)
+        }.recycle()
+
+        val result = callback.results.poll(10, TimeUnit.SECONDS)
+        assertNotNull(result)
+        assertEquals(CALL_ID, result!!.callId)
+        assertEquals(0, result.exitCode)
+        assertEquals("nightzuku\n", String(result.stdout, Charsets.UTF_8))
+    }
+
+    @Test
+    fun `execAsync honours an explicit pid hint when oneway reports no pid`() {
+        attach().recycle()
+        ShadowBinder.setCallingPid(0)
+
+        transact(NightProtocol.TRANSACTION_EXEC_ASYNC) { data ->
+            data.writeLong(CALL_ID)
+            data.writeStringArray(ECHO_COMMAND)
+            data.writeStringArray(null)
+            data.writeString(null)
+            data.writeLong(NightProtocol.EXEC_FAST_DEFAULT_TIMEOUT_MS)
+            data.writeInt(CALLING_PID)
+        }.recycle()
+
+        val result = callback.results.poll(10, TimeUnit.SECONDS)
+        assertNotNull(result)
+        assertEquals(CALL_ID, result!!.callId)
+        assertEquals(0, result.exitCode)
+        assertEquals("nightzuku\n", String(result.stdout, Charsets.UTF_8))
+    }
+
+    @Test
+    fun `cancelExec stops an in-flight async command and reports cancellation`() {
         attach().recycle()
 
         transact(NightProtocol.TRANSACTION_EXEC_ASYNC) { data ->
@@ -150,7 +190,13 @@ class ServerCycleTest {
             data.writeLong(CALL_ID)
         }.recycle()
 
-        assertNull(callback.results.poll(2, TimeUnit.SECONDS))
+        val result = callback.results.poll(5, TimeUnit.SECONDS)
+        assertNotNull(result)
+        assertEquals(CALL_ID, result!!.callId)
+        assertEquals(137, result.exitCode)
+        assertFalse(result.timedOut)
+        assertEquals("", String(result.stdout, Charsets.UTF_8))
+        assertEquals("Command execution cancelled", String(result.stderr, Charsets.UTF_8))
     }
 
     private fun attach(): Parcel =

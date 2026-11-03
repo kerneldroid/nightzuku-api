@@ -52,6 +52,10 @@ open class NightzukuServerService :
 
     protected open fun createNightEndpoint(): NightServiceEndpoint = NightServiceEndpoint(this)
 
+    override fun enforceCallingPermission(func: String, callingUid: Int, callingPid: Int) {
+        super<Service>.enforceCallingPermission(func, callingUid, callingPid)
+    }
+
     override val serverPolicy: ServerPolicy? by lazy {
         NightzukuServerPolicy(
             config = config,
