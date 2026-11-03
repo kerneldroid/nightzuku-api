@@ -25,6 +25,8 @@ Kotlin-first IPC protocol, client SDK, dual-wire `ContentProvider`, Rust-powered
 
 ## Maven
 
+**Latest release:** [`13.2.1` on Maven Central](https://central.sonatype.com/artifact/io.github.kerneldroid/api/13.2.1)
+
 Published artifacts use the `io.github.kerneldroid` group on Maven Central.
 
 ```kotlin
