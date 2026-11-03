@@ -22,6 +22,28 @@ Kotlin-first IPC protocol, client SDK, dual-wire `ContentProvider`, Rust-powered
 5. **Lock-Free `NightSession` Snapshot & `NightDiagnostics`**: `NightClient` stores an immutable `NightSession` inside `AtomicReference<NightSession?>` and reports protocol version mismatches explicitly via `NightDiagnostics.Incompatible(clientVersion, serverVersion, serverMinVersion, status)`.
 6. **Hardened `UserServiceManager` & R8 Consumer Rules**: `UserServiceManager` closes `sh` stdout/stderr streams, enforces a 15-second launch timeout, checks `isCallerStillAllowed` inside `synchronized(this)` before record creation, and ships `api/consumer-rules.pro` to preserve `IBinder` service constructors under R8.
 
+## Building
+
+Requirements:
+
+- JDK 21
+- Android SDK platform 37.0, build-tools 37.0.0, NDK `29.0.14206865`
+- Rust 1.85+ with the four Android targets and `cargo-ndk`
+
+```bash
+rustup target add aarch64-linux-android armv7-linux-androideabi i686-linux-android x86_64-linux-android
+cargo install cargo-ndk --locked
+
+cp local.properties.example local.properties   # set sdk.dir
+./gradlew build
+
+# Rust unit tests
+cargo test --manifest-path rust/Cargo.toml --workspace
+```
+
+`local.properties` is intentionally untracked. CI runs the same commands on JDK 21 via
+`.github/workflows/build.yml`.
+
 ## Native Nightzuku Client Usage
 
 ### 1. Declare Permission & Provider in `AndroidManifest.xml`
