@@ -15,6 +15,9 @@ android {
             minifyEnabled false
         }
     }
+    testOptions {
+        unitTests.includeAndroidResources = true
+    }
     compileOptions {
         sourceCompatibility JavaVersion.VERSION_21
         targetCompatibility JavaVersion.VERSION_21
@@ -24,6 +27,9 @@ android {
 dependencies {
     api project(':api')
     implementation 'androidx.annotation:annotation:1.11.0'
+
+    testImplementation 'junit:junit:4.13.2'
+    testImplementation 'org.robolectric:robolectric:4.16.1'
 }
 
 ext {

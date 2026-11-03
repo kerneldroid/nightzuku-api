@@ -14,6 +14,7 @@ import android.content.ContentValues
 import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
+import android.content.pm.PackageManager
 import android.content.pm.ProviderInfo
 import android.database.Cursor
 import android.net.Uri
@@ -34,10 +35,13 @@ import moe.shizuku.api.BinderContainer
  */
 open class ShizukuProvider : ContentProvider() {
 
+    private var providerAuthority: String? = null
+
     override fun attachInfo(context: Context, info: ProviderInfo) {
         super.attachInfo(context, info)
         check(!info.multiprocess) { "android:multiprocess must be false" }
         check(info.exported) { "android:exported must be true" }
+        providerAuthority = info.authority
         isProviderProcess = true
     }
 
@@ -51,31 +55,119 @@ open class ShizukuProvider : ContentProvider() {
     }
 
     override fun call(method: String, arg: String?, extras: Bundle?): Bundle? {
-        if (extras == null) return null
-
         return when (method) {
             NightProtocol.METHOD_SEND_BINDER -> {
+                if (extras == null) return null
                 enforcePrivilegedOrSelfCaller()
                 handleSendNightBinder(extras)
                 Bundle()
             }
             NightProtocol.METHOD_GET_BINDER -> {
+                if (extras == null) return null
                 enforcePrivilegedOrSelfCaller()
                 val reply = Bundle()
                 if (handleGetNightBinder(reply)) reply else null
             }
+            NightProtocol.METHOD_REQUEST_BINDER,
+            NightProtocol.LEGACY_METHOD_REQUEST_BINDER -> handleRequestBinder(method, arg, extras)
             METHOD_SEND_BINDER -> {
+                if (extras == null) return null
                 enforcePrivilegedOrSelfCaller()
                 extras.classLoader = BinderContainer::class.java.classLoader
                 handleSendLegacyBinder(extras)
                 Bundle()
             }
             METHOD_GET_BINDER -> {
+                if (extras == null) return null
                 enforcePrivilegedOrSelfCaller()
                 val reply = Bundle()
                 if (handleGetLegacyBinder(reply)) reply else null
             }
-            else -> Bundle()
+            else -> null
+        }
+    }
+
+    /**
+     * Serves a pull request from [NightClient.connectFast].
+     *
+     * `requestNightBinder` maps to the native Nightzuku wire and `requestBinder` maps to the
+     * legacy Shizuku wire. This mirrors the client fallback order: it first asks for the native
+     * binder and only falls back to the legacy request method when the native reply is absent.
+     */
+    private fun handleRequestBinder(method: String, arg: String?, extras: Bundle?): Bundle? {
+        val legacyWire = method == NightProtocol.LEGACY_METHOD_REQUEST_BINDER
+        val permission = if (legacyWire) PERMISSION else NIGHT_PERMISSION
+        if (!callerHasPermission(permission)) {
+            Log.w(
+                TAG,
+                "Rejected binder request from uid=${Binder.getCallingUid()}: missing $permission"
+            )
+            return null
+        }
+
+        val cached = if (legacyWire) cachedLegacyBinder() else cachedNightBinder()
+        if (cached != null) {
+            return createBinderReply(legacyWire, cached)
+        }
+
+        val hookExtras = Bundle().apply {
+            extras?.let { putAll(it) }
+            if (arg != null && !containsKey(EXTRA_REQUEST_PACKAGE_NAME)) {
+                putString(EXTRA_REQUEST_PACKAGE_NAME, arg)
+            }
+        }
+        val requested = try {
+            onBinderRequested(providerAuthority.orEmpty(), hookExtras)
+        } catch (t: Throwable) {
+            Log.w(TAG, "onBinderRequested failed for authority=${providerAuthority.orEmpty()}", t)
+            null
+        } ?: return null
+
+        if (!requested.pingBinder()) return null
+        return createBinderReply(legacyWire, requested)
+    }
+
+    /**
+     * Extension point for an embedding manager that can hand out its privileged binder when
+     * nothing has been pushed to this provider yet.
+     *
+     * Implementations may return a live [IBinder] directly, or trigger an asynchronous server
+     * push (for example through [NightProtocol.METHOD_SEND_BINDER]) and return `null`. The
+     * default returns `null`, so a provider that has already been seeded through `sendBinder`
+     * still serves the cached path without any override.
+     *
+     * @param authority authority of this provider instance
+     * @param extras extras supplied by the requesting client (`packageName` when available)
+     */
+    protected open fun onBinderRequested(authority: String, extras: Bundle?): IBinder? = null
+
+    private fun callerHasPermission(permission: String): Boolean {
+        val ctx = context ?: return false
+        return try {
+            ctx.checkCallingOrSelfPermission(permission) == PackageManager.PERMISSION_GRANTED
+        } catch (t: Throwable) {
+            Log.w(TAG, "Permission check for $permission failed", t)
+            false
+        }
+    }
+
+    private fun cachedNightBinder(): IBinder? =
+        NightClient.getBinder()?.takeIf { it.pingBinder() }
+
+    private fun cachedLegacyBinder(): IBinder? {
+        // Check the legacy slot directly so Shizuku.getBinder()'s NightClient fallback cannot
+        // leak a native binder through the legacy wire.
+        if (!Shizuku.pingBinder()) return null
+        return Shizuku.getBinder()?.takeIf { it.pingBinder() }
+    }
+
+    private fun createBinderReply(legacyWire: Boolean, binder: IBinder): Bundle {
+        return Bundle().apply {
+            if (legacyWire) {
+                putParcelable(EXTRA_BINDER, BinderContainer(binder))
+            } else {
+                putBinder(NightProtocol.EXTRA_BINDER, binder)
+            }
         }
     }
 
@@ -159,7 +251,8 @@ open class ShizukuProvider : ContentProvider() {
         const val METHOD_GET_BINDER: String = "getBinder"
         const val ACTION_BINDER_RECEIVED: String = "moe.shizuku.api.action.BINDER_RECEIVED"
         const val ACTION_NIGHT_BINDER_RECEIVED: String = "kerneldroid.nightzuku.api.action.BINDER_RECEIVED"
-        private const val EXTRA_BINDER: String = "moe.shizuku.privileged.api.intent.extra.BINDER"
+        private const val EXTRA_BINDER: String = LegacyParcelCodec.LEGACY_BINDER_EXTRA_KEY
+        private const val EXTRA_REQUEST_PACKAGE_NAME: String = "packageName"
 
         const val PERMISSION: String = "moe.shizuku.manager.permission.API_V23"
         const val NIGHT_PERMISSION: String = "kerneldroid.nightzuku.permission.API"
