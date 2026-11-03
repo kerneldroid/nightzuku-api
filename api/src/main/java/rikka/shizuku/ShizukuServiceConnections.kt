@@ -10,7 +10,7 @@ internal object ShizukuServiceConnections {
 
     @JvmStatic
     fun get(args: Shizuku.UserServiceArgs): ShizukuServiceConnection {
-        val key = args.tag ?: args.componentName.className
+        val key = "${args.componentName.packageName}:${args.tag ?: args.componentName.className}"
         synchronized(CACHE) {
             var connection = CACHE[key]
             if (connection == null) {

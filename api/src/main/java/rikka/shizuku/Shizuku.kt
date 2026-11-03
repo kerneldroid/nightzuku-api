@@ -444,6 +444,13 @@ open class Shizuku protected constructor() {
             }
         }
 
+        private fun cleanupFailedConnection(connection: ShizukuServiceConnection, conn: ServiceConnection) {
+            connection.removeConnection(conn)
+            if (!connection.hasConnections()) {
+                ShizukuServiceConnections.remove(connection)
+            }
+        }
+
         @JvmStatic
         fun bindUserService(args: UserServiceArgs, conn: ServiceConnection) {
             if (!pingBinder() && NightClient.pingBinder()) {
@@ -454,8 +461,10 @@ open class Shizuku protected constructor() {
             connection.addConnection(conn)
             try {
                 requireService().addUserService(connection, args.forAdd())
-            } catch (e: RemoteException) {
-                throw rethrowAsRuntimeException(e)
+            } catch (t: Throwable) {
+                cleanupFailedConnection(connection, conn)
+                if (t is RemoteException) throw rethrowAsRuntimeException(t)
+                throw t
             }
         }
 
@@ -471,14 +480,21 @@ open class Shizuku protected constructor() {
                     putBoolean(ShizukuApiConstants.USER_SERVICE_ARG_NO_CREATE, true)
                 }
                 requireService().addUserService(connection, bundle)
-            } catch (e: RemoteException) {
-                throw rethrowAsRuntimeException(e)
+            } catch (t: Throwable) {
+                cleanupFailedConnection(connection, conn)
+                if (t is RemoteException) throw rethrowAsRuntimeException(t)
+                throw t
             }
 
-            if (getVersion() >= 13) {
-                return result
+            val normalized = if (getVersion() >= 13) {
+                result
+            } else {
+                if (result == 0) 0 else -1
             }
-            return if (result == 0) 0 else -1
+            if (normalized < 0) {
+                cleanupFailedConnection(connection, conn)
+            }
+            return normalized
         }
 
         @JvmStatic
@@ -516,7 +532,7 @@ open class Shizuku protected constructor() {
 
         @JvmStatic
         fun checkRemotePermission(permission: String): Int {
-            if (serverUid == 0) return PackageManager.PERMISSION_GRANTED
+            if (getUid() == 0) return PackageManager.PERMISSION_GRANTED
             return try {
                 requireService().checkPermission(permission)
             } catch (e: RemoteException) {

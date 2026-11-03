@@ -4,6 +4,9 @@ plugins {
 
 android {
     namespace 'rikka.rish'
+    defaultConfig {
+        consumerProguardFiles 'consumer-rules.pro'
+    }
     buildFeatures {
         buildConfig = false
     }
@@ -19,22 +22,16 @@ android {
 }
 
 dependencies {
-    implementation project(':api')
     implementation 'androidx.annotation:annotation:1.11.0'
 
     testImplementation 'junit:junit:4.13.2'
 }
 
 ext.rustPackages = ['rish']
-def rustNativeScript = rootProject.file('gradle/rust-native.gradle').exists()
-        ? rootProject.file('gradle/rust-native.gradle')
-        : project.file('../gradle/rust-native.gradle')
-if (rustNativeScript.exists()) {
-    apply from: rustNativeScript
-}
+apply from: rootProject.file('gradle/rust-native.gradle')
 
 ext {
     publishLibrary = true
-    POM_NAME = "Nightzuku API - RISH"
-    POM_DESCRIPTION = "Remote interactive shell bridge for Nightzuku."
+    POM_NAME = "Nightzuku API - rish"
+    POM_DESCRIPTION = "Interactive PTY shell and process-group spawner bridge backed by librish.so."
 }

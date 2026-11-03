@@ -13,6 +13,12 @@ object NightProtocol {
     const val DESCRIPTOR = "kerneldroid.nightzuku.INightService"
     const val CALLBACK_DESCRIPTOR = "kerneldroid.nightzuku.INightCallback"
     const val PROTOCOL_VERSION = 2
+    const val MIN_PROTOCOL_VERSION = 2
+
+    // Handshake status codes written as the first int in TRANSACTION_ATTACH reply
+    const val ATTACH_STATUS_OK = 0
+    const val ATTACH_STATUS_CLIENT_TOO_OLD = 1
+    const val ATTACH_STATUS_SERVER_TOO_OLD = 2
 
     const val PROVIDER_SUFFIX = ".nightzuku"
     const val LEGACY_PROVIDER_SUFFIX = ".shizuku"
@@ -63,10 +69,13 @@ object NightProtocol {
     const val TRANSACTION_ADD_USER_SERVICE = IBinder.FIRST_CALL_TRANSACTION + 14
     const val TRANSACTION_REMOVE_USER_SERVICE = IBinder.FIRST_CALL_TRANSACTION + 15
     const val TRANSACTION_NEW_PROCESS = IBinder.FIRST_CALL_TRANSACTION + 16
+    const val TRANSACTION_EXEC_ASYNC = IBinder.FIRST_CALL_TRANSACTION + 17
+    const val TRANSACTION_CANCEL_EXEC = IBinder.FIRST_CALL_TRANSACTION + 18
 
     // INightCallback transaction codes
     const val CALLBACK_ON_PERMISSION_CHANGED = IBinder.FIRST_CALL_TRANSACTION + 1
     const val CALLBACK_ON_REQUEST_PERMISSION_RESULT = IBinder.FIRST_CALL_TRANSACTION + 2
+    const val CALLBACK_ON_EXEC_RESULT = IBinder.FIRST_CALL_TRANSACTION + 3
 
     // Bounds for fast one-shot command execution
     const val EXEC_FAST_MAX_OUTPUT_BYTES = 256 * 1024

@@ -9,6 +9,9 @@ package rikka.rish
 
 import android.os.ParcelFileDescriptor
 import android.os.SystemClock
+import android.system.ErrnoException
+import android.system.Os
+import android.system.OsConstants
 import android.util.Log
 import java.io.IOException
 import java.nio.charset.StandardCharsets
@@ -24,6 +27,13 @@ open class RishHost(
     stdout: ParcelFileDescriptor?,
     stderr: ParcelFileDescriptor?
 ) {
+
+    data class SpawnedProcessGroup(
+        val pid: Int,
+        val stdinPfd: ParcelFileDescriptor,
+        val stdoutPfd: ParcelFileDescriptor,
+        val stderrPfd: ParcelFileDescriptor
+    )
 
     private val stdinFd: Int = detachFd(stdin)
     private val stdoutFd: Int = detachFd(stdout)
@@ -151,6 +161,74 @@ open class RishHost(
             return pfd?.detachFd() ?: -1
         }
 
+        /**
+         * Spawns a command in a new session and process group (`setsid`, so `pgid == pid`)
+         * via `librish.so` (`nativeSpawnGroup`) and wraps the returned pipe descriptors.
+         */
+        @JvmStatic
+        fun spawnProcessGroup(
+            cmd: Array<String>,
+            env: Array<String>?,
+            dir: String?
+        ): SpawnedProcessGroup {
+            require(cmd.isNotEmpty()) { "Command array must not be empty" }
+            RishConfig.ensureLibraryLoaded()
+            val fds = nativeSpawnGroup(cmd, env, dir)
+            check(fds.size >= 4 && fds[0] > 0) { "nativeSpawnGroup returned invalid result" }
+            return SpawnedProcessGroup(
+                pid = fds[0],
+                stdinPfd = ParcelFileDescriptor.adoptFd(fds[1]),
+                stdoutPfd = ParcelFileDescriptor.adoptFd(fds[2]),
+                stderrPfd = ParcelFileDescriptor.adoptFd(fds[3])
+            )
+        }
+
+        /**
+         * Attempts to spawn a command in its own `setsid` process group via `librish.so`,
+         * returning `null` if the native library is unavailable (e.g., in host JVM unit tests).
+         */
+        @JvmStatic
+        fun spawnProcessGroupOrNull(
+            cmd: Array<String>,
+            env: Array<String>?,
+            dir: String?
+        ): SpawnedProcessGroup? {
+            return try {
+                spawnProcessGroup(cmd, env, dir)
+            } catch (_: UnsatisfiedLinkError) {
+                null
+            }
+        }
+
+        /**
+         * Waits for a child process spawned via [spawnProcessGroup] and returns its normalized exit code.
+         */
+        @JvmStatic
+        fun waitForPid(pid: Int): Int {
+            if (pid <= 0) return -1
+            RishConfig.ensureLibraryLoaded()
+            return waitFor(pid)
+        }
+
+        /**
+         * Immediately kills the entire process group `-pid` (`SIGKILL`), falling back to `pid` if needed.
+         */
+        @JvmStatic
+        fun killProcessGroup(pid: Int) {
+            if (pid <= 0) return
+            try {
+                Os.kill(-pid, OsConstants.SIGKILL)
+            } catch (e: ErrnoException) {
+                if (e.errno == OsConstants.ESRCH) {
+                    try {
+                        Os.kill(pid, OsConstants.SIGKILL)
+                    } catch (_: ErrnoException) {
+                    }
+                }
+            } catch (_: Throwable) {
+            }
+        }
+
         @JvmStatic
         private external fun start(
             argBlock: ByteArray?,
@@ -162,6 +240,13 @@ open class RishHost(
             stdin: Int,
             stdout: Int,
             stderr: Int
+        ): IntArray
+
+        @JvmStatic
+        external fun nativeSpawnGroup(
+            cmd: Array<String>,
+            env: Array<String>?,
+            dir: String?
         ): IntArray
 
         @JvmStatic

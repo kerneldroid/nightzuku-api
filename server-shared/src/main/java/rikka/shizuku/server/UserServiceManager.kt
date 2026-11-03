@@ -42,6 +42,7 @@ import rikka.shizuku.server.util.AbiUtil
 import rikka.shizuku.server.util.HostProcess
 import rikka.shizuku.server.util.Logger
 import rikka.shizuku.server.util.OsUtils
+import rikka.shizuku.server.util.ProcessCompat
 import rikka.shizuku.server.util.UserHandleCompat
 
 abstract class UserServiceManager {
@@ -179,10 +180,12 @@ abstract class UserServiceManager {
 
     open fun canReuseUserServiceRecord(record: UserServiceRecord, packageInfo: PackageInfo): Boolean = true
 
+    @JvmOverloads
     fun addUserService(
         conn: IShizukuServiceConnection?,
         options: Bundle?,
-        callingApiVersion: Int
+        callingApiVersion: Int,
+        isCallerStillAllowed: () -> Boolean = { true }
     ): Int {
         Objects.requireNonNull(conn, "connection is null")
         Objects.requireNonNull(options, "options is null")
@@ -216,6 +219,10 @@ abstract class UserServiceManager {
         val key = buildRecordKey(userId, packageName, tag ?: className)
 
         synchronized(this) {
+            if (!isCallerStillAllowed()) {
+                throw SecurityException("Permission revoked for uid=$uid before starting UserService")
+            }
+
             var record = getUserServiceRecordLocked(userId, packageName, tag ?: className)
             if (record != null && !canReuseUserServiceRecord(record, packageInfo)) {
                 LOGGER.w("Service record %s (%s) does not belong to current installation of %s", key, record.token, packageName)
@@ -225,9 +232,9 @@ abstract class UserServiceManager {
 
             if (noCreate) {
                 if (record != null) {
-                    record.callbacks.register(validConn)
                     val activeBinder = record.service
                     if (activeBinder != null && activeBinder.pingBinder()) {
+                        record.callbacks.register(validConn)
                         record.broadcastBinderReceived()
                         return if (callingApiVersion >= 13) record.versionCode else 0
                     }
@@ -408,13 +415,20 @@ abstract class UserServiceManager {
         var process: Process? = null
         val exitCode = try {
             process = Runtime.getRuntime().exec("sh")
+            runCatching { process.inputStream.close() }
+            runCatching { process.errorStream.close() }
             process.outputStream.use { os ->
                 os.write(cmd.toByteArray())
                 os.flush()
             }
-            process.waitFor()
+            if (!ProcessCompat.waitFor(process, START_COMMAND_TIMEOUT_SECONDS, TimeUnit.SECONDS)) {
+                ProcessCompat.destroyForcibly(process)
+                throw IllegalStateException("Timed out starting UserService")
+            }
+            process.exitValue()
         } catch (e: Throwable) {
-            process?.destroy()
+            process?.let { ProcessCompat.destroyForcibly(it) }
+            if (e is IllegalStateException) throw e
             throw IllegalStateException(e.message, e)
         }
         if (exitCode != 0) {
@@ -544,6 +558,7 @@ abstract class UserServiceManager {
         const val MAX_SPAWN_RETRIES: Int = 3
         const val SPAWN_RETRY_DELAY_MS: Long = 150L
         const val HOST_KILL_GRACE_MILLIS: Long = 3_000L
+        const val START_COMMAND_TIMEOUT_SECONDS: Long = 15L
 
         @Suppress("DEPRECATION")
         private fun userServiceLookupFlags(): Long {

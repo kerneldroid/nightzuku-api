@@ -18,10 +18,18 @@ import android.os.Handler
 import android.os.IBinder
 import android.os.Looper
 import android.os.Parcel
+import android.os.ParcelFileDescriptor
 import android.os.RemoteException
 import android.util.Log
 import java.nio.charset.StandardCharsets
+import java.util.concurrent.CompletableFuture
+import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.CopyOnWriteArrayList
+import java.util.concurrent.atomic.AtomicLong
+import java.util.concurrent.atomic.AtomicReference
+import kotlin.coroutines.resume
+import kotlin.coroutines.resumeWithException
+import kotlinx.coroutines.suspendCancellableCoroutine
 import moe.shizuku.server.IRemoteProcess
 import rikka.shizuku.Shizuku
 import rikka.shizuku.ShizukuApiConstants
@@ -29,12 +37,65 @@ import rikka.shizuku.ShizukuRemoteProcess
 import rikka.shizuku.ShizukuServiceConnections
 
 /**
+ * Immutable, lock-free snapshot of an attached Nightzuku client session.
+ *
+ * Replaces disjoint `@Volatile` fields so readers always observe a mutually consistent
+ * `(binder, serverUid, serverVersion, seContext, permissionGranted, shouldShowRationale, capabilities)` slice.
+ */
+data class NightSession(
+    val sessionId: Long,
+    val binder: IBinder,
+    val serverUid: Int,
+    val serverVersion: Int,
+    val seContext: String?,
+    val permissionGranted: Boolean,
+    val shouldShowRationale: Boolean,
+    val capabilities: Int
+)
+
+/**
+ * Connection and protocol handshake diagnostics for [NightClient].
+ */
+sealed class NightDiagnostics {
+    data object Idle : NightDiagnostics()
+
+    data class Connected(
+        val sessionId: Long,
+        val serverUid: Int,
+        val serverVersion: Int,
+        val serverMinVersion: Int,
+        val seContext: String?,
+        val capabilities: Int
+    ) : NightDiagnostics()
+
+    data class Incompatible(
+        val clientVersion: Int,
+        val serverVersion: Int,
+        val serverMinVersion: Int = serverVersion,
+        val status: Int = if (clientVersion < serverMinVersion) {
+            NightProtocol.ATTACH_STATUS_CLIENT_TOO_OLD
+        } else {
+            NightProtocol.ATTACH_STATUS_SERVER_TOO_OLD
+        }
+    ) : NightDiagnostics() {
+        constructor(clientVersion: Int, serverVersion: Int) : this(
+            clientVersion = clientVersion,
+            serverVersion = serverVersion,
+            serverMinVersion = serverVersion
+        )
+    }
+
+    data class Disconnected(val reason: String? = null) : NightDiagnostics()
+}
+
+/**
  * High-speed, zero-stub client connector for the native Nightzuku API (`INightService`).
  *
  * Communicates with `NightServiceEndpoint` using flat Parcel serialization,
- * supports capability inspection, guarded `transactRemote`, one-shot `execFast`,
- * remote process spawning, UserService binding/peeking/unbinding, proactive `connectFast` pull,
- * global access pause control, and server diagnostics queries.
+ * atomic [NightSession] state snapshots, explicit [NightDiagnostics] handshake reporting,
+ * non-blocking `oneway` async command execution (`execAsync` / `execAsyncFuture`),
+ * one-shot `execFast`, kernel-EOF remote process spawning, UserService binding/peeking/unbinding,
+ * proactive `connectFast` pull, global access pause control, and server diagnostics queries.
  */
 object NightClient {
 
@@ -83,43 +144,42 @@ object NightClient {
         fun onPermissionResult(requestCode: Int, grantResult: Int, capabilities: Int)
     }
 
+    fun interface OnDiagnosticsListener {
+        fun onDiagnosticsChanged(diagnostics: NightDiagnostics)
+    }
+
     private data class ListenerHolder<T>(
         val listener: T,
         val handler: Handler?
     )
 
     private val stateLock = Any()
+    private val nextSessionId = AtomicLong(1L)
+    private val nextExecCallId = AtomicLong(1L)
 
-    @Volatile
-    private var binder: IBinder? = null
+    private val session = AtomicReference<NightSession?>()
+    private val diagnostics = AtomicReference<NightDiagnostics>(NightDiagnostics.Idle)
+    private val pendingExecCalls = ConcurrentHashMap<Long, CompletableFuture<ExecResult>>()
 
     private var linkedBinder: IBinder? = null
-
-    @Volatile
-    private var serverUid: Int = -1
-
-    @Volatile
-    private var serverVersion: Int = -1
-
-    @Volatile
-    private var serverContext: String? = null
-
-    @Volatile
-    private var permissionGranted: Boolean = false
-
-    @Volatile
-    private var shouldShowRationale: Boolean = false
-
-    @Volatile
-    private var capabilitiesMask: Int = 0
-
-    @Volatile
-    private var binderReady: Boolean = false
 
     private val mainHandler = Handler(Looper.getMainLooper())
     private val receivedListeners = CopyOnWriteArrayList<ListenerHolder<OnBinderReceivedListener>>()
     private val deadListeners = CopyOnWriteArrayList<ListenerHolder<OnBinderDeadListener>>()
     private val permissionListeners = CopyOnWriteArrayList<ListenerHolder<OnPermissionResultListener>>()
+    private val diagnosticsListeners = CopyOnWriteArrayList<ListenerHolder<OnDiagnosticsListener>>()
+
+    private class ExecCallFuture(
+        private val callId: Long
+    ) : CompletableFuture<ExecResult>() {
+        override fun cancel(mayInterruptIfRunning: Boolean): Boolean {
+            val cancelled = super.cancel(mayInterruptIfRunning)
+            if (cancelled) {
+                cancelExecAsync(callId)
+            }
+            return cancelled
+        }
+    }
 
     private val callbackBinder: Binder = object : Binder() {
         override fun onTransact(code: Int, data: Parcel, reply: Parcel?, flags: Int): Boolean {
@@ -130,9 +190,16 @@ object NightClient {
                 }
                 NightProtocol.CALLBACK_ON_PERMISSION_CHANGED -> {
                     data.enforceInterface(NightProtocol.CALLBACK_DESCRIPTOR)
-                    permissionGranted = data.readInt() != 0
-                    shouldShowRationale = data.readInt() != 0
-                    capabilitiesMask = data.readInt()
+                    val granted = data.readInt() != 0
+                    val rationale = data.readInt() != 0
+                    val caps = data.readInt()
+                    session.updateAndGet { current ->
+                        current?.copy(
+                            permissionGranted = granted,
+                            shouldShowRationale = rationale,
+                            capabilities = caps
+                        )
+                    }
                     return true
                 }
                 NightProtocol.CALLBACK_ON_REQUEST_PERMISSION_RESULT -> {
@@ -140,10 +207,27 @@ object NightClient {
                     val requestCode = data.readInt()
                     val allowed = data.readInt() != 0
                     val caps = data.readInt()
-                    permissionGranted = allowed
-                    capabilitiesMask = caps
+                    session.updateAndGet { current ->
+                        current?.copy(
+                            permissionGranted = allowed,
+                            shouldShowRationale = if (allowed) false else current.shouldShowRationale,
+                            capabilities = caps
+                        )
+                    }
                     val grantResult = if (allowed) PackageManager.PERMISSION_GRANTED else PackageManager.PERMISSION_DENIED
                     dispatchPermissionResult(requestCode, grantResult, caps)
+                    return true
+                }
+                NightProtocol.CALLBACK_ON_EXEC_RESULT -> {
+                    data.enforceInterface(NightProtocol.CALLBACK_DESCRIPTOR)
+                    val callId = data.readLong()
+                    val exitCode = data.readInt()
+                    val timedOut = data.readInt() != 0
+                    val stdout = data.createByteArray() ?: ByteArray(0)
+                    val stderr = data.createByteArray() ?: ByteArray(0)
+                    pendingExecCalls.remove(callId)?.complete(
+                        ExecResult(exitCode, timedOut, stdout, stderr)
+                    )
                     return true
                 }
             }
@@ -164,56 +248,90 @@ object NightClient {
         }
     }
 
+    private fun failPendingExecCalls(reason: String) {
+        val keys = ArrayList(pendingExecCalls.keys)
+        for (callId in keys) {
+            pendingExecCalls.remove(callId)?.completeExceptionally(RemoteException(reason))
+        }
+    }
+
     @JvmStatic
     fun onBinderReceived(newBinder: IBinder?, packageName: String?) {
         var shouldDispatchReceived = false
         var shouldDispatchDead = false
+        var updatedDiagnostics: NightDiagnostics? = null
 
         synchronized(stateLock) {
-            if (newBinder != null && binder === newBinder && binderReady && newBinder.pingBinder()) {
+            val existingSession = session.get()
+            if (newBinder != null && existingSession?.binder === newBinder && newBinder.pingBinder()) {
                 return
             }
 
             unlinkCurrentLocked()
 
             if (newBinder == null) {
-                val hadBinder = binder != null || binderReady
-                binder = null
-                serverUid = -1
-                serverVersion = -1
-                serverContext = null
-                permissionGranted = false
-                shouldShowRationale = false
-                capabilitiesMask = 0
-                binderReady = false
-                shouldDispatchDead = hadBinder
+                val hadSession = existingSession != null
+                session.set(null)
+                val disc = NightDiagnostics.Disconnected("Binder died or cleared")
+                diagnostics.set(disc)
+                updatedDiagnostics = disc
+                shouldDispatchDead = hadSession
             } else {
-                binder = newBinder
                 try {
                     newBinder.linkToDeath(deathRecipient, 0)
                     linkedBinder = newBinder
                 } catch (t: Throwable) {
                     Log.w(TAG, "linkToDeath failed", t)
-                    binder = null
-                    binderReady = false
+                    session.set(null)
+                    val disc = NightDiagnostics.Disconnected("linkToDeath failed: ${t.message}")
+                    diagnostics.set(disc)
+                    updatedDiagnostics = disc
                     return
                 }
 
                 if (packageName != null) {
                     try {
-                        attachFlat(newBinder, packageName)
-                        binderReady = true
-                        shouldDispatchReceived = true
+                        val attached = attachFlat(newBinder, packageName)
+                        updatedDiagnostics = diagnostics.get()
+                        if (attached) {
+                            shouldDispatchReceived = true
+                        } else {
+                            unlinkCurrentLocked()
+                            session.set(null)
+                            if (existingSession != null) {
+                                shouldDispatchDead = true
+                            }
+                        }
                     } catch (t: Throwable) {
                         Log.w(TAG, "Flat attach handshake failed", t)
                         unlinkCurrentLocked()
-                        binder = null
-                        binderReady = false
+                        session.set(null)
+                        val disc = NightDiagnostics.Disconnected("Handshake failed: ${t.message}")
+                        diagnostics.set(disc)
+                        updatedDiagnostics = disc
                         return
                     }
+                } else {
+                    val newSession = NightSession(
+                        sessionId = nextSessionId.getAndIncrement(),
+                        binder = newBinder,
+                        serverUid = -1,
+                        serverVersion = NightProtocol.PROTOCOL_VERSION,
+                        seContext = null,
+                        permissionGranted = false,
+                        shouldShowRationale = false,
+                        capabilities = 0
+                    )
+                    session.set(newSession)
                 }
             }
         }
+
+        if (shouldDispatchDead) {
+            failPendingExecCalls("NightService binder died")
+        }
+
+        updatedDiagnostics?.let(::dispatchDiagnostics)
 
         if (shouldDispatchDead) {
             dispatchBinderDead()
@@ -315,7 +433,7 @@ object NightClient {
     }
 
     @Throws(RemoteException::class)
-    private fun attachFlat(target: IBinder, packageName: String) {
+    private fun attachFlat(target: IBinder, packageName: String): Boolean {
         val data = Parcel.obtain()
         val reply = Parcel.obtain()
         try {
@@ -325,13 +443,56 @@ object NightClient {
             data.writeString(packageName)
             target.transact(NightProtocol.TRANSACTION_ATTACH, data, reply, 0)
             reply.readException()
-            serverUid = reply.readInt()
-            serverVersion = reply.readInt()
+
+            val status = reply.readInt()
+            val srvProtocolVersion = reply.readInt()
+            val srvMinProtocolVersion = reply.readInt()
+
+            if (status != NightProtocol.ATTACH_STATUS_OK) {
+                val incompatible = NightDiagnostics.Incompatible(
+                    clientVersion = NightProtocol.PROTOCOL_VERSION,
+                    serverVersion = srvProtocolVersion,
+                    serverMinVersion = srvMinProtocolVersion,
+                    status = status
+                )
+                diagnostics.set(incompatible)
+                session.set(null)
+                Log.w(
+                    TAG,
+                    "Protocol version mismatch: status=$status client=${NightProtocol.PROTOCOL_VERSION} " +
+                        "server=$srvProtocolVersion (min=$srvMinProtocolVersion)"
+                )
+                return false
+            }
+
+            val srvUid = reply.readInt()
             val grantState = reply.readInt()
-            capabilitiesMask = reply.readInt()
-            serverContext = reply.readString()
-            permissionGranted = grantState == NightProtocol.STATE_GRANTED
-            shouldShowRationale = grantState == NightProtocol.STATE_DENIED_PERMANENT
+            val caps = reply.readInt()
+            val seContext = reply.readString()
+            val sid = nextSessionId.getAndIncrement()
+
+            val newSession = NightSession(
+                sessionId = sid,
+                binder = target,
+                serverUid = srvUid,
+                serverVersion = srvProtocolVersion,
+                seContext = seContext,
+                permissionGranted = grantState == NightProtocol.STATE_GRANTED,
+                shouldShowRationale = grantState == NightProtocol.STATE_DENIED_PERMANENT,
+                capabilities = caps
+            )
+            session.set(newSession)
+            diagnostics.set(
+                NightDiagnostics.Connected(
+                    sessionId = sid,
+                    serverUid = srvUid,
+                    serverVersion = srvProtocolVersion,
+                    serverMinVersion = srvMinProtocolVersion,
+                    seContext = seContext,
+                    capabilities = caps
+                )
+            )
+            return true
         } finally {
             reply.recycle()
             data.recycle()
@@ -339,40 +500,58 @@ object NightClient {
     }
 
     @JvmStatic
-    fun getBinder(): IBinder? = binder
+    fun getSession(): NightSession? = session.get()
 
     @JvmStatic
-    fun pingBinder(): Boolean = binder?.pingBinder() == true
+    fun getDiagnostics(): NightDiagnostics = diagnostics.get()
 
     @JvmStatic
-    fun getUid(): Int = serverUid
+    fun getBinder(): IBinder? = session.get()?.binder
 
     @JvmStatic
-    fun getVersion(): Int = serverVersion
+    fun pingBinder(): Boolean = session.get()?.binder?.pingBinder() == true
 
     @JvmStatic
-    fun getSELinuxContext(): String? = serverContext
+    fun getUid(): Int = session.get()?.serverUid ?: -1
 
     @JvmStatic
-    fun getCapabilities(): Int = capabilitiesMask
+    fun getVersion(): Int = session.get()?.serverVersion ?: -1
 
     @JvmStatic
-    fun hasCapability(capabilityFlag: Int): Boolean = (capabilitiesMask and capabilityFlag) != 0
+    fun getSELinuxContext(): String? = session.get()?.seContext
+
+    @JvmStatic
+    fun getCapabilities(): Int = session.get()?.capabilities ?: 0
+
+    @JvmStatic
+    fun hasCapability(capabilityFlag: Int): Boolean = ((session.get()?.capabilities ?: 0) and capabilityFlag) != 0
 
     @JvmStatic
     fun checkSelfPermission(): Int {
-        if (permissionGranted) return PackageManager.PERMISSION_GRANTED
-        val current = binder ?: return PackageManager.PERMISSION_DENIED
+        val currentSession = session.get() ?: return PackageManager.PERMISSION_DENIED
+        if (currentSession.permissionGranted) return PackageManager.PERMISSION_GRANTED
+        val currentBinder = currentSession.binder
         val data = Parcel.obtain()
         val reply = Parcel.obtain()
         return try {
             data.writeInterfaceToken(NightProtocol.DESCRIPTOR)
-            current.transact(NightProtocol.TRANSACTION_CHECK_PERMISSION, data, reply, 0)
+            currentBinder.transact(NightProtocol.TRANSACTION_CHECK_PERMISSION, data, reply, 0)
             reply.readException()
-            permissionGranted = reply.readInt() != 0
-            shouldShowRationale = reply.readInt() != 0
-            capabilitiesMask = reply.readInt()
-            if (permissionGranted) PackageManager.PERMISSION_GRANTED else PackageManager.PERMISSION_DENIED
+            val granted = reply.readInt() != 0
+            val rationale = reply.readInt() != 0
+            val caps = reply.readInt()
+            session.updateAndGet { s ->
+                if (s?.binder === currentBinder) {
+                    s.copy(
+                        permissionGranted = granted,
+                        shouldShowRationale = rationale,
+                        capabilities = caps
+                    )
+                } else {
+                    s
+                }
+            }
+            if (granted) PackageManager.PERMISSION_GRANTED else PackageManager.PERMISSION_DENIED
         } catch (e: RemoteException) {
             throw RuntimeException(e)
         } finally {
@@ -383,8 +562,9 @@ object NightClient {
 
     @JvmStatic
     fun shouldShowRequestPermissionRationale(): Boolean {
-        if (permissionGranted) return false
-        return shouldShowRationale
+        val currentSession = session.get() ?: return false
+        if (currentSession.permissionGranted) return false
+        return currentSession.shouldShowRationale
     }
 
     @JvmStatic
@@ -437,6 +617,91 @@ object NightClient {
         }
     }
 
+    /**
+     * Dispatches an asynchronous command over `IBinder.FLAG_ONEWAY` without blocking any client
+     * or server Binder thread during command execution. Cancelling the returned [CompletableFuture]
+     * sends `oneway TRANSACTION_CANCEL_EXEC(callId)` to immediately kill the remote process group.
+     */
+    @JvmStatic
+    @JvmOverloads
+    fun execAsyncFuture(
+        cmd: Array<String>,
+        env: Array<String>? = null,
+        dir: String? = null,
+        timeoutMs: Long = NightProtocol.EXEC_FAST_DEFAULT_TIMEOUT_MS
+    ): CompletableFuture<ExecResult> {
+        val current = requireBinder()
+        val callId = nextExecCallId.getAndIncrement()
+        val future = ExecCallFuture(callId)
+        pendingExecCalls[callId] = future
+
+        val data = Parcel.obtain()
+        try {
+            data.writeInterfaceToken(NightProtocol.DESCRIPTOR)
+            data.writeLong(callId)
+            data.writeStringArray(cmd)
+            data.writeStringArray(env)
+            data.writeString(dir)
+            data.writeLong(timeoutMs)
+            val sent = current.transact(NightProtocol.TRANSACTION_EXEC_ASYNC, data, null, IBinder.FLAG_ONEWAY)
+            if (!sent) {
+                pendingExecCalls.remove(callId)
+                future.completeExceptionally(RemoteException("TRANSACTION_EXEC_ASYNC returned false"))
+            }
+        } catch (t: Throwable) {
+            pendingExecCalls.remove(callId)
+            future.completeExceptionally(t)
+        } finally {
+            data.recycle()
+        }
+        return future
+    }
+
+    /**
+     * Suspending coroutine wrapper over [execAsyncFuture] with zero thread-pool blocking.
+     * Cancelling the calling coroutine immediately dispatches `oneway TRANSACTION_CANCEL_EXEC(callId)`.
+     */
+    suspend fun execAsync(
+        cmd: Array<String>,
+        env: Array<String>? = null,
+        dir: String? = null,
+        timeoutMs: Long = NightProtocol.EXEC_FAST_DEFAULT_TIMEOUT_MS
+    ): ExecResult = suspendCancellableCoroutine { cont ->
+        val future = try {
+            execAsyncFuture(cmd, env, dir, timeoutMs)
+        } catch (t: Throwable) {
+            cont.resumeWithException(t)
+            return@suspendCancellableCoroutine
+        }
+        cont.invokeOnCancellation {
+            future.cancel(true)
+        }
+        future.whenComplete { result, error ->
+            if (error != null) {
+                if (!cont.isCancelled) {
+                    cont.resumeWithException(error)
+                }
+            } else if (result != null) {
+                cont.resume(result)
+            }
+        }
+    }
+
+    @JvmStatic
+    fun cancelExecAsync(callId: Long) {
+        pendingExecCalls.remove(callId)
+        val current = session.get()?.binder ?: return
+        val data = Parcel.obtain()
+        try {
+            data.writeInterfaceToken(NightProtocol.DESCRIPTOR)
+            data.writeLong(callId)
+            current.transact(NightProtocol.TRANSACTION_CANCEL_EXEC, data, null, IBinder.FLAG_ONEWAY)
+        } catch (_: Throwable) {
+        } finally {
+            data.recycle()
+        }
+    }
+
     @JvmStatic
     @JvmOverloads
     fun newProcess(
@@ -444,7 +709,7 @@ object NightClient {
         env: Array<String>? = null,
         dir: String? = null
     ): ShizukuRemoteProcess {
-        val current = binder
+        val current = session.get()?.binder
         if (current != null && current.pingBinder()) {
             val data = Parcel.obtain()
             val reply = Parcel.obtain()
@@ -458,7 +723,12 @@ object NightClient {
                     val remoteBinder = reply.readStrongBinder()
                     val remoteProcess = IRemoteProcess.Stub.asInterface(remoteBinder)
                         ?: throw IllegalStateException("Server returned null IRemoteProcess")
-                    return ShizukuRemoteProcess(remoteProcess)
+                    val exitPipe = if (reply.dataAvail() > 0 && reply.readInt() != 0) {
+                        ParcelFileDescriptor.CREATOR.createFromParcel(reply)
+                    } else {
+                        null
+                    }
+                    return ShizukuRemoteProcess(remoteProcess, exitPipe)
                 }
             } catch (e: RemoteException) {
                 throw RuntimeException(e)
@@ -470,9 +740,16 @@ object NightClient {
         return Shizuku.newProcess(cmd, env, dir)
     }
 
+    private fun cleanupFailedConnection(connection: rikka.shizuku.ShizukuServiceConnection, conn: ServiceConnection) {
+        connection.removeConnection(conn)
+        if (!connection.hasConnections()) {
+            ShizukuServiceConnections.remove(connection)
+        }
+    }
+
     @JvmStatic
     fun bindUserService(args: Shizuku.UserServiceArgs, conn: ServiceConnection): Int {
-        val current = binder
+        val current = session.get()?.binder
         if (current != null && current.pingBinder()) {
             val connection = ShizukuServiceConnections.get(args)
             connection.addConnection(conn)
@@ -486,8 +763,11 @@ object NightClient {
                     reply.readException()
                     return reply.readInt()
                 }
-            } catch (e: RemoteException) {
-                throw RuntimeException(e)
+                cleanupFailedConnection(connection, conn)
+            } catch (t: Throwable) {
+                cleanupFailedConnection(connection, conn)
+                if (t is RemoteException) throw RuntimeException(t)
+                throw t
             } finally {
                 reply.recycle()
                 data.recycle()
@@ -499,7 +779,7 @@ object NightClient {
 
     @JvmStatic
     fun peekUserService(args: Shizuku.UserServiceArgs, conn: ServiceConnection): Int {
-        val current = binder
+        val current = session.get()?.binder
         if (current != null && current.pingBinder()) {
             val connection = ShizukuServiceConnections.get(args)
             connection.addConnection(conn)
@@ -514,10 +794,17 @@ object NightClient {
                 data.writeBundle(options)
                 if (current.transact(NightProtocol.TRANSACTION_ADD_USER_SERVICE, data, reply, 0)) {
                     reply.readException()
-                    return reply.readInt()
+                    val res = reply.readInt()
+                    if (res < 0) {
+                        cleanupFailedConnection(connection, conn)
+                    }
+                    return res
                 }
-            } catch (e: RemoteException) {
-                throw RuntimeException(e)
+                cleanupFailedConnection(connection, conn)
+            } catch (t: Throwable) {
+                cleanupFailedConnection(connection, conn)
+                if (t is RemoteException) throw RuntimeException(t)
+                throw t
             } finally {
                 reply.recycle()
                 data.recycle()
@@ -528,7 +815,7 @@ object NightClient {
 
     @JvmStatic
     fun unbindUserService(args: Shizuku.UserServiceArgs, conn: ServiceConnection?, remove: Boolean) {
-        val current = binder
+        val current = session.get()?.binder
         if (current != null && current.pingBinder()) {
             if (remove) {
                 val data = Parcel.obtain()
@@ -730,7 +1017,7 @@ object NightClient {
 
     @JvmStatic
     fun getServerDiagnostics(): Bundle? {
-        val current = binder ?: return null
+        val current = session.get()?.binder ?: return null
         val data = Parcel.obtain()
         val reply = Parcel.obtain()
         return try {
@@ -762,7 +1049,7 @@ object NightClient {
         val shouldNotifyNow: Boolean
         synchronized(stateLock) {
             receivedListeners.add(ListenerHolder(listener, handler))
-            shouldNotifyNow = binderReady && binder?.pingBinder() == true
+            shouldNotifyNow = session.get()?.binder?.pingBinder() == true
         }
         if (shouldNotifyNow) {
             if (handler != null) {
@@ -833,6 +1120,28 @@ object NightClient {
         }
     }
 
+    @JvmStatic
+    @JvmOverloads
+    fun addDiagnosticsListener(listener: OnDiagnosticsListener, handler: Handler? = null) {
+        synchronized(stateLock) {
+            diagnosticsListeners.add(ListenerHolder(listener, handler))
+        }
+    }
+
+    @JvmStatic
+    fun removeDiagnosticsListener(listener: OnDiagnosticsListener): Boolean {
+        synchronized(stateLock) {
+            var removed = false
+            for (holder in diagnosticsListeners) {
+                if (holder.listener == listener) {
+                    diagnosticsListeners.remove(holder)
+                    removed = true
+                }
+            }
+            return removed
+        }
+    }
+
     private fun dispatchBinderReceived() {
         for (holder in receivedListeners) {
             val h = holder.handler
@@ -872,8 +1181,21 @@ object NightClient {
         }
     }
 
+    private fun dispatchDiagnostics(diag: NightDiagnostics) {
+        for (holder in diagnosticsListeners) {
+            val h = holder.handler
+            if (h != null) {
+                h.post { holder.listener.onDiagnosticsChanged(diag) }
+            } else if (Looper.myLooper() == Looper.getMainLooper()) {
+                holder.listener.onDiagnosticsChanged(diag)
+            } else {
+                mainHandler.post { holder.listener.onDiagnosticsChanged(diag) }
+            }
+        }
+    }
+
     @JvmStatic
     fun requireBinder(): IBinder {
-        return binder ?: throw IllegalStateException("NightClient binder hasn't been received")
+        return session.get()?.binder ?: throw IllegalStateException("NightClient binder hasn't been received")
     }
 }

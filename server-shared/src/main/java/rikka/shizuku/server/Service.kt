@@ -24,6 +24,7 @@ import moe.shizuku.server.IShizukuService
 import moe.shizuku.server.IShizukuServiceConnection
 import rikka.hidden.compat.PermissionManagerApis
 import rikka.rish.RishConfig
+import rikka.rish.RishHost
 import rikka.rish.RishService
 import rikka.shizuku.ShizukuApiConstants
 import rikka.shizuku.server.api.RemoteProcessHolder
@@ -112,6 +113,17 @@ abstract class Service<
             LOGGER.w(msg)
             throw SecurityException(msg)
         }
+    }
+
+    protected open fun isCallerAllowedForUserService(callingUid: Int, callingPid: Int): Boolean {
+        if (callingUid == OsUtils.getUid()) {
+            return true
+        }
+        val clientRecord = clientManager.findClient(callingUid, callingPid)
+        if (checkCallerPermission("addUserService", callingUid, callingPid, clientRecord)) {
+            return true
+        }
+        return clientRecord != null && clientRecord.allowed
     }
 
     protected open fun validateRemoteTransactTarget(targetBinder: IBinder?) {
@@ -231,7 +243,9 @@ abstract class Service<
         val callingPid = Binder.getCallingPid()
         val clientRecord = clientManager.findClient(callingUid, callingPid)
         val callingApiVersion = clientRecord?.apiVersion ?: ShizukuApiConstants.SERVER_VERSION
-        return userServiceManager.addUserService(conn, options, callingApiVersion)
+        return userServiceManager.addUserService(conn, options, callingApiVersion) {
+            isCallerAllowedForUserService(callingUid, callingPid)
+        }
     }
 
     override fun attachUserService(binder: IBinder, options: Bundle) {
@@ -308,14 +322,19 @@ abstract class Service<
             dir
         )
 
+        val clientRecord = clientManager.findClient(Binder.getCallingUid(), Binder.getCallingPid())
+        val token = clientRecord?.client?.asBinder()
+
+        val spawned = RishHost.spawnProcessGroupOrNull(cmd, env, dir)
+        if (spawned != null) {
+            return RemoteProcessHolder(spawned, token)
+        }
+
         val process = try {
             Runtime.getRuntime().exec(cmd, env, if (dir != null) File(dir) else null)
         } catch (e: IOException) {
             throw IllegalStateException(e.message)
         }
-
-        val clientRecord = clientManager.findClient(Binder.getCallingUid(), Binder.getCallingPid())
-        val token = clientRecord?.client?.asBinder()
 
         return RemoteProcessHolder(process, token)
     }

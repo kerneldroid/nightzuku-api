@@ -1,17 +1,26 @@
 # Nightzuku API
 
-Kotlin-first IPC protocol, client SDK, dual-wire `ContentProvider`, Rust-powered interactive PTY shell (`rish`) bridge, and privileged server foundation for [Nightzuku](https://github.com/kerneldroid/Nightzuku).
+Kotlin-first IPC protocol, client SDK, dual-wire `ContentProvider`, Rust-powered interactive PTY shell (`rish`) and process-group spawner bridge, and privileged server foundation for [Nightzuku](https://github.com/kerneldroid/Nightzuku).
 
 ## Architecture & Modules
 
 | Module | Namespace | Description |
 | :--- | :--- | :--- |
-| `:aidl` | `rikka.shizuku.aidl` | Low-level AIDL interfaces (`IShizukuService`, `IShizukuApplication`, `IShizukuServiceConnection`, `IRemoteProcess`). |
-| `:shared` | `rikka.shizuku.shared` | Native `NightProtocol` wire constants, capability bitmasks, zero-stub `LegacyParcelCodec`, and `ShizukuApiConstants`. |
-| `:api` | `rikka.shizuku.api` | Native `NightClient`, `NightBinderWrapper`, and `NightSystemProperties` (`kerneldroid.nightzuku.api`), plus the Kotlin-rewritten `rikka.shizuku.*` compatibility layer. |
-| `:provider` | `rikka.shizuku.provider` | Dual-wire `NightProvider` and `ShizukuProvider` for receiving and proactively pulling privileged binders across `NightProtocol` and legacy Shizuku authorities. |
-| `:rish` | `rikka.rish` | Interactive PTY shell bridge (`Rish`, `RishHost`, `RishTerminal`, `RishService`, `RishConfig`) backed by `librish.so` (Rust Edition 2024 in `rust/rish`). |
+| `:aidl` | `rikka.shizuku.aidl` | Low-level AIDL interfaces (`IShizukuService`, `IShizukuApplication`, `IShizukuServiceConnection`, `IRemoteProcess` with `getExitFd()`). |
+| `:shared` | `rikka.shizuku.shared` | Native `NightProtocol` wire constants, capability bitmasks, handshake status codes, zero-stub `LegacyParcelCodec`, and `ShizukuApiConstants`. |
+| `:api` | `rikka.shizuku.api` | Native `NightClient`, atomic `NightSession`, `NightDiagnostics`, `NightBinderWrapper`, `NightSystemProperties` (`kerneldroid.nightzuku.api`), consumer R8 rules (`consumer-rules.pro`), and the Kotlin-rewritten `rikka.shizuku.*` layer with kernel-EOF `ShizukuRemoteProcess`. |
+| `:provider` | `rikka.shizuku.provider` | Dual-wire `NightProvider` and `ShizukuProvider` with kernel `callingUid` validation and binder-free multi-process broadcast signaling. |
+| `:rish` | `rikka.rish` | Interactive PTY shell bridge (`Rish`, `RishHost`, `RishTerminal`, `RishService`, `RishConfig`) and `nativeSpawnGroup` (`setsid`) process-group spawner backed by `librish.so` (Rust Edition 2024 in `rust/rish`). |
 | `:server-shared` | `rikka.shizuku.server` | Privileged server abstractions (`Service`, `ClientManager`, `ConfigManager`, `UserServiceManager`, `UserService`, `RemoteProcessHolder`, `HostProcess`, `IContentProviderUtils`). |
+
+## Key Engineering Highlights
+
+1. **Kernel EOF Pipe Waiting (`exitPipe` + `Os.poll`)**: `RemoteProcessHolder` creates a kernel pipe (`ParcelFileDescriptor.createPipe()`) and closes its write end immediately upon process termination; `ShizukuRemoteProcess.waitFor()` / `waitForTimeout()` polls `exitPipe[0]` via `Os.poll` with **0 Binder polling transactions** and microsecond wake-up latency.
+2. **Non-Blocking `oneway` Async Execution (`TRANSACTION_EXEC_ASYNC`)**: `NightClient.execAsync` (`suspendCancellableCoroutine`) and `NightClient.execAsyncFuture` (`CompletableFuture<ExecResult>`) dispatch `IBinder.FLAG_ONEWAY` requests and receive results over `INightCallback` (`CALLBACK_ON_EXEC_RESULT`), sending `oneway TRANSACTION_CANCEL_EXEC` on cancellation without tying up client or server Binder threads.
+3. **Rust `setsid` Process-Group Spawner (`nativeSpawnGroup`)**: `librish.so` exports `RishHost.nativeSpawnGroup(cmd, env, dir)` which `fork()`s, calls `libc::setsid()` (`pgid == pid`), attaches `O_CLOEXEC` stdio pipes, and enables instant process-tree termination via `Os.kill(-pid, OsConstants.SIGKILL)`.
+4. **Kernel `callingUid` Guard & Binder-Free Multi-Process Broadcast**: `ShizukuProvider.call()` enforces `callingUid in {0, 2000, Process.myUid()}` before accepting or serving binders, and `enableMultiProcess` sends an empty broadcast signal so secondary processes always pull the binder from their own verified provider authority.
+5. **Lock-Free `NightSession` Snapshot & `NightDiagnostics`**: `NightClient` stores an immutable `NightSession` inside `AtomicReference<NightSession?>` and reports protocol version mismatches explicitly via `NightDiagnostics.Incompatible(clientVersion, serverVersion, serverMinVersion, status)`.
+6. **Hardened `UserServiceManager` & R8 Consumer Rules**: `UserServiceManager` closes `sh` stdout/stderr streams, enforces a 15-second launch timeout, checks `isCallerStillAllowed` inside `synchronized(this)` before record creation, and ships `api/consumer-rules.pro` to preserve `IBinder` service constructors under R8.
 
 ## Native Nightzuku Client Usage
 
@@ -55,10 +64,14 @@ fun connectAndRun(context: Context) {
     // Listen for binder lifecycle (race-free sticky registration)
     NightClient.addBinderReceivedListenerSticky {
         if (NightClient.checkSelfPermission() == PackageManager.PERMISSION_GRANTED) {
-            // Fast one-shot command execution over flat Parcel IPC
+            // Fast synchronous or non-blocking oneway async command execution
             if (NightClient.hasCapability(NightProtocol.CAP_SHELL_EXEC)) {
                 val result = NightClient.execFast(arrayOf("id"))
                 println("stdout: ${result.outputText}")
+
+                NightClient.execAsyncFuture(arrayOf("uname", "-a")).thenAccept { asyncRes ->
+                    println("async stdout: ${asyncRes.outputText}")
+                }
             }
 
             // Bind a privileged UserService over NightProtocol

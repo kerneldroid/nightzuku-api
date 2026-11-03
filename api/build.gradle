@@ -4,6 +4,9 @@ plugins {
 
 android {
     namespace 'rikka.shizuku.api'
+    defaultConfig {
+        consumerProguardFiles 'consumer-rules.pro'
+    }
     buildFeatures {
         buildConfig = false
     }
@@ -23,6 +26,7 @@ dependencies {
     api project(':shared')
 
     implementation 'androidx.annotation:annotation:1.11.0'
+    compileOnly 'org.jetbrains.kotlinx:kotlinx-coroutines-core:1.11.0'
 }
 
 ext {

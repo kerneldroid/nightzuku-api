@@ -17,9 +17,11 @@ import android.content.IntentFilter
 import android.content.pm.ProviderInfo
 import android.database.Cursor
 import android.net.Uri
+import android.os.Binder
 import android.os.Build
 import android.os.Bundle
 import android.os.IBinder
+import android.os.Process
 import android.util.Log
 import kerneldroid.nightzuku.api.LegacyParcelCodec
 import kerneldroid.nightzuku.api.NightClient
@@ -41,24 +43,35 @@ open class ShizukuProvider : ContentProvider() {
 
     override fun onCreate(): Boolean = true
 
+    private fun enforcePrivilegedOrSelfCaller() {
+        val callingUid = Binder.getCallingUid()
+        if (callingUid != 0 && callingUid != 2000 && callingUid != Process.myUid()) {
+            throw SecurityException("Unauthorized binder delivery from uid=$callingUid")
+        }
+    }
+
     override fun call(method: String, arg: String?, extras: Bundle?): Bundle? {
         if (extras == null) return null
 
         return when (method) {
             NightProtocol.METHOD_SEND_BINDER -> {
+                enforcePrivilegedOrSelfCaller()
                 handleSendNightBinder(extras)
                 Bundle()
             }
             NightProtocol.METHOD_GET_BINDER -> {
+                enforcePrivilegedOrSelfCaller()
                 val reply = Bundle()
                 if (handleGetNightBinder(reply)) reply else null
             }
             METHOD_SEND_BINDER -> {
+                enforcePrivilegedOrSelfCaller()
                 extras.classLoader = BinderContainer::class.java.classLoader
                 handleSendLegacyBinder(extras)
                 Bundle()
             }
             METHOD_GET_BINDER -> {
+                enforcePrivilegedOrSelfCaller()
                 val reply = Bundle()
                 if (handleGetLegacyBinder(reply)) reply else null
             }
@@ -76,11 +89,7 @@ open class ShizukuProvider : ContentProvider() {
         if (binder != null && ctx != null) {
             NightClient.onBinderReceived(binder, ctx.packageName)
             if (enableMultiProcess) {
-                val broadcastExtras = Bundle().apply {
-                    putBinder(NightProtocol.EXTRA_BINDER, binder)
-                }
                 val intent = Intent(ACTION_NIGHT_BINDER_RECEIVED)
-                    .putExtras(broadcastExtras)
                     .setPackage(ctx.packageName)
                 ctx.sendBroadcast(intent)
             }
@@ -109,7 +118,6 @@ open class ShizukuProvider : ContentProvider() {
             Shizuku.onBinderReceived(binder, ctx.packageName)
             if (enableMultiProcess) {
                 val intent = Intent(ACTION_BINDER_RECEIVED)
-                    .putExtra(EXTRA_BINDER, BinderContainer(binder))
                     .setPackage(ctx.packageName)
                 ctx.sendBroadcast(intent)
             }
@@ -204,23 +212,9 @@ open class ShizukuProvider : ContentProvider() {
                     val created = object : BroadcastReceiver() {
                         override fun onReceive(ctx: Context, intent: Intent) {
                             when (intent.action) {
-                                ACTION_NIGHT_BINDER_RECEIVED -> {
-                                    val binder = intent.extras?.getBinder(NightProtocol.EXTRA_BINDER)
-                                    if (binder != null && binder.pingBinder()) {
-                                        NightClient.onBinderReceived(binder, ctx.packageName)
-                                    } else {
-                                        fetchBinderFromOwnProvider(appContext)
-                                    }
-                                }
+                                ACTION_NIGHT_BINDER_RECEIVED,
                                 ACTION_BINDER_RECEIVED -> {
-                                    @Suppress("DEPRECATION")
-                                    val container = intent.getParcelableExtra<BinderContainer>(EXTRA_BINDER)
-                                    val binder = container?.binder
-                                    if (binder != null && binder.pingBinder()) {
-                                        Shizuku.onBinderReceived(binder, ctx.packageName)
-                                    } else {
-                                        fetchBinderFromOwnProvider(appContext)
-                                    }
+                                    fetchBinderFromOwnProvider(appContext)
                                 }
                             }
                         }

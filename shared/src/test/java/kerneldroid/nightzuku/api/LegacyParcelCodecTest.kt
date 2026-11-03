@@ -115,9 +115,25 @@ class LegacyParcelCodecTest {
             NightProtocol.TRANSACTION_GET_SERVER_DIAGNOSTICS,
             NightProtocol.TRANSACTION_ADD_USER_SERVICE,
             NightProtocol.TRANSACTION_REMOVE_USER_SERVICE,
-            NightProtocol.TRANSACTION_NEW_PROCESS
+            NightProtocol.TRANSACTION_NEW_PROCESS,
+            NightProtocol.TRANSACTION_EXEC_ASYNC,
+            NightProtocol.TRANSACTION_CANCEL_EXEC
         )
         assertEquals(transactions.size, transactions.distinct().size)
+
+        val callbacks = listOf(
+            NightProtocol.CALLBACK_ON_PERMISSION_CHANGED,
+            NightProtocol.CALLBACK_ON_REQUEST_PERMISSION_RESULT,
+            NightProtocol.CALLBACK_ON_EXEC_RESULT
+        )
+        assertEquals(callbacks.size, callbacks.distinct().size)
+
+        val statuses = listOf(
+            NightProtocol.ATTACH_STATUS_OK,
+            NightProtocol.ATTACH_STATUS_CLIENT_TOO_OLD,
+            NightProtocol.ATTACH_STATUS_SERVER_TOO_OLD
+        )
+        assertEquals(statuses.size, statuses.distinct().size)
 
         val allCaps = NightProtocol.CAP_SHELL_EXEC or
             NightProtocol.CAP_BINDER_PROXY or

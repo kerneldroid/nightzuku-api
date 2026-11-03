@@ -17,4 +17,6 @@ interface IRemoteProcess {
     boolean alive();
 
     boolean waitForTimeout(long timeout, String unit);
+
+    ParcelFileDescriptor getExitFd();
 }
