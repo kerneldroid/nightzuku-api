@@ -42,6 +42,7 @@ import rikka.shizuku.server.util.AbiUtil
 import rikka.shizuku.server.util.HostProcess
 import rikka.shizuku.server.util.Logger
 import rikka.shizuku.server.util.OsUtils
+import rikka.shizuku.server.util.PackageSignatureVerifier
 import rikka.shizuku.server.util.ProcessCompat
 import rikka.shizuku.server.util.UserHandleCompat
 
@@ -62,7 +63,17 @@ abstract class UserServiceManager {
     private val packageUserServiceRecords: MutableMap<String, MutableList<UserServiceRecord>> =
         Collections.synchronizedMap(ArrayMap())
 
-    fun ensureCallingPackageForUserService(packageName: String, appId: Int, userId: Int): PackageInfo {
+    /**
+     * Serializes subclass hooks. Hooks are invoked outside [UserServiceManager]'s monitor (so
+     * they may acquire their own locks or call back into the manager) but must still not run
+     * concurrently with each other.
+     */
+    private val hookLock = Any()
+
+    @Volatile
+    private var accessPaused: Boolean = false
+
+    open fun ensureCallingPackageForUserService(packageName: String, appId: Int, userId: Int): PackageInfo {
         @SuppressLint("UnsafeOptInUsageError")
         val packageInfo = PackageManagerApis.getPackageInfoNoThrow(
             packageName,
@@ -114,16 +125,25 @@ abstract class UserServiceManager {
             throw IllegalArgumentException("connection is null and the service is not being removed")
         }
 
+        var removed: UserServiceRecord? = null
         synchronized(this) {
             val record = getUserServiceRecordLocked(userId, packageName, tag ?: className) ?: return 1
             if (remove) {
-                removeUserServiceLocked(record)
+                removed = removeUserServiceLocked(record)
             } else {
                 record.callbacks.unregister(conn)
             }
         }
+        removed?.let(::finishRemoval)
         return 0
     }
+
+    /**
+     * Removes [record] from the bookkeeping maps and marks it removed. The caller must invoke
+     * [finishRemoval] after leaving the manager monitor.
+     */
+    private fun removeUserServiceLocked(record: UserServiceRecord): UserServiceRecord? =
+        detachUserServiceLocked(record)
 
     private fun detachUserServiceLocked(record: UserServiceRecord): UserServiceRecord? {
         val removed = userServiceRecords.values.remove(record)
@@ -140,22 +160,33 @@ abstract class UserServiceManager {
         }
         if (!removed) return null
         record.markRemoved()
-        onUserServiceRecordRemoved(record)
         return record
     }
 
-    private fun removeUserServiceLocked(record: UserServiceRecord) {
-        val detached = detachUserServiceLocked(record) ?: return
-        detached.host?.let(::scheduleHostKill)
-        cleanupExecutor.execute { detached.destroy() }
+    /**
+     * Runs the externally visible removal side effects. Must be called outside the manager monitor:
+     * [onUserServiceRecordRemoved] is a subclass hook and may acquire its own locks.
+     */
+    private fun finishRemoval(record: UserServiceRecord) {
+        try {
+            synchronized(hookLock) {
+                onUserServiceRecordRemoved(record)
+            }
+        } finally {
+            record.host?.let(::scheduleHostKill)
+            cleanupExecutor.execute { record.destroy() }
+        }
     }
 
-    private fun dropRecordIfNotAttachedLocked(record: UserServiceRecord) {
-        synchronized(this) {
+    private fun dropRecordIfNotAttached(record: UserServiceRecord) {
+        val removed = synchronized(this) {
             if (record.service == null && !record.isRemoved) {
                 removeUserServiceLocked(record)
+            } else {
+                null
             }
         }
+        removed?.let(::finishRemoval)
     }
 
     private fun destroyUnknownBinder(binder: IBinder, interfaceDescriptor: String?) {
@@ -178,7 +209,21 @@ abstract class UserServiceManager {
         }
     }
 
-    open fun canReuseUserServiceRecord(record: UserServiceRecord, packageInfo: PackageInfo): Boolean = true
+    /**
+     * Returns whether an existing record may be reused for the current installation.
+     *
+     * The base implementation compares the owning UID and, when a signing baseline was captured
+     * at creation time, the current signing certificate snapshot (including P+ key rotation
+     * lineage). Subclasses may override to add stricter checks.
+     */
+    open fun canReuseUserServiceRecord(record: UserServiceRecord, packageInfo: PackageInfo): Boolean {
+        val applicationInfo = packageInfo.applicationInfo ?: return false
+        if (record.ownerUid >= 0 && record.ownerUid != applicationInfo.uid) return false
+        val baseline = record.signingBaseline ?: return true
+        val userId = UserHandleCompat.getUserId(applicationInfo.uid)
+        val snapshot = PackageSignatureVerifier.extractSnapshot(packageInfo, userId) ?: return true
+        return baseline.matches(snapshot)
+    }
 
     @JvmOverloads
     fun addUserService(
@@ -192,6 +237,10 @@ abstract class UserServiceManager {
         val validConn = conn!!
         val validOptions = options!!.apply {
             classLoader = Bundle::class.java.classLoader
+        }
+
+        if (isAccessPaused()) {
+            throw SecurityException("Client access is globally paused")
         }
 
         val uid = Binder.getCallingUid()
@@ -218,6 +267,10 @@ abstract class UserServiceManager {
         val use32Bits = validOptions.getBoolean(USER_SERVICE_ARG_USE_32_BIT_APP_PROCESS, false)
         val key = buildRecordKey(userId, packageName, tag ?: className)
 
+        val pendingRemovals = ArrayList<UserServiceRecord>()
+        val createdRecords = ArrayList<UserServiceRecord>()
+        var startRecord: UserServiceRecord? = null
+        val result: Int
         synchronized(this) {
             if (!isCallerStillAllowed()) {
                 throw SecurityException("Permission revoked for uid=$uid before starting UserService")
@@ -225,8 +278,13 @@ abstract class UserServiceManager {
 
             var record = getUserServiceRecordLocked(userId, packageName, tag ?: className)
             if (record != null && !canReuseUserServiceRecord(record, packageInfo)) {
-                LOGGER.w("Service record %s (%s) does not belong to current installation of %s", key, record.token, packageName)
-                removeUserServiceLocked(record)
+                LOGGER.w(
+                    "Service record %s (%s) does not belong to current installation of %s",
+                    key,
+                    record.token,
+                    packageName
+                )
+                removeUserServiceLocked(record)?.let(pendingRemovals::add)
                 record = null
             }
 
@@ -236,12 +294,23 @@ abstract class UserServiceManager {
                     if (activeBinder != null && activeBinder.pingBinder()) {
                         record.callbacks.register(validConn)
                         record.broadcastBinderReceived()
-                        return if (callingApiVersion >= 13) record.versionCode else 0
+                        result = if (callingApiVersion >= 13) record.versionCode else 0
+                    } else {
+                        result = if (callingApiVersion >= 13) -1 else 1
                     }
+                } else {
+                    result = if (callingApiVersion >= 13) -1 else 1
                 }
-                return if (callingApiVersion >= 13) -1 else 1
             } else {
-                val newRecord = createUserServiceRecordIfNeededLocked(record, key, versionCode, daemon, packageInfo)
+                val newRecord = createUserServiceRecordIfNeededLocked(
+                    record,
+                    key,
+                    versionCode,
+                    daemon,
+                    packageInfo,
+                    pendingRemovals,
+                    createdRecords
+                )
                 newRecord.callbacks.register(validConn)
 
                 val activeBinder = newRecord.service
@@ -249,23 +318,44 @@ abstract class UserServiceManager {
                     newRecord.broadcastBinderReceived()
                 } else if (!newRecord.starting) {
                     newRecord.setStartingTimeout(DateUtils.SECOND_IN_MILLIS * 30)
-                    executor.execute {
-                        startUserServiceWithRetry(
-                            newRecord,
-                            key,
-                            newRecord.token,
-                            packageName,
-                            className,
-                            processNameSuffix,
-                            uid,
-                            use32Bits,
-                            debug
-                        )
-                    }
+                    startRecord = newRecord
                 }
-                return 0
+                result = 0
             }
         }
+
+        // Hooks and process spawning happen outside the monitor.
+        for (removed in pendingRemovals) {
+            finishRemoval(removed)
+        }
+        val created = createdRecords.firstOrNull()
+        if (created != null) {
+            try {
+                synchronized(hookLock) {
+                    onUserServiceRecordCreated(created, packageInfo)
+                }
+            } catch (t: Throwable) {
+                val removed = synchronized(this) { removeUserServiceLocked(created) }
+                removed?.let(::finishRemoval)
+                throw t
+            }
+        }
+        startRecord?.let { record ->
+            executor.execute {
+                startUserServiceWithRetry(
+                    record,
+                    key,
+                    record.token,
+                    packageName,
+                    className,
+                    processNameSuffix,
+                    uid,
+                    use32Bits,
+                    debug
+                )
+            }
+        }
+        return result
     }
 
     private fun createUserServiceRecordIfNeededLocked(
@@ -273,7 +363,9 @@ abstract class UserServiceManager {
         key: String,
         versionCode: Int,
         daemon: Boolean,
-        packageInfo: PackageInfo
+        packageInfo: PackageInfo,
+        pendingRemovals: MutableList<UserServiceRecord>,
+        createdOut: MutableList<UserServiceRecord>
     ): UserServiceRecord {
         if (record != null) {
             val activeBinder = record.service
@@ -295,17 +387,19 @@ abstract class UserServiceManager {
                 return record
             }
 
-            removeUserServiceLocked(record)
+            removeUserServiceLocked(record)?.let(pendingRemovals::add)
         }
 
         val created = object : UserServiceRecord(versionCode, daemon) {
             override fun removeSelf() {
-                synchronized(this@UserServiceManager) {
+                val removed = synchronized(this@UserServiceManager) {
                     removeUserServiceLocked(this)
                 }
+                removed?.let { this@UserServiceManager.finishRemoval(it) }
             }
         }
         created.ownerUid = packageInfo.applicationInfo!!.uid
+        created.signingBaseline = PackageSignatureVerifier.extractBaseline(packageInfo)
 
         val packageName = packageInfo.packageName
         val list = packageUserServiceRecords.getOrPut(packageName) {
@@ -313,9 +407,8 @@ abstract class UserServiceManager {
         }
         list.add(created)
 
-        onUserServiceRecordCreated(created, packageInfo)
-
         userServiceRecords[key] = created
+        createdOut.add(created)
         LOGGER.i(
             "New service record %s (%s): version=%d, daemon=%s, apk=%s",
             key,
@@ -379,7 +472,7 @@ abstract class UserServiceManager {
         }
 
         LOGGER.e(lastError, "All %d spawn attempts failed for service record %s (%s)", MAX_SPAWN_RETRIES, key, token)
-        dropRecordIfNotAttachedLocked(record)
+        dropRecordIfNotAttached(record)
     }
 
     private fun startUserService(
@@ -393,7 +486,7 @@ abstract class UserServiceManager {
         use32Bits: Boolean,
         debug: Boolean
     ) {
-        if (record.isRemoved || record.pendingDestroy) {
+        if (record.isRemoved || record.pendingDestroy || record.service != null) {
             return
         }
         LOGGER.v("Starting process for service record %s (%s)...", key, token)
@@ -491,6 +584,7 @@ abstract class UserServiceManager {
         pid: Int,
         expectedUid: Int = OsUtils.getUid()
     ): Boolean {
+        if (isAccessPaused()) return false
         if (token.isNullOrEmpty()) return false
         val host = captureHost(pid) ?: return false
         if (host.uid != expectedUid) return false
@@ -517,6 +611,56 @@ abstract class UserServiceManager {
         synchronized(this) {
             val record = userServiceRecords.values.firstOrNull { it.token == token } ?: return false
             return !record.isRemoved && !record.pendingDestroy
+        }
+    }
+
+    /** Immutable snapshot of every tracked UserService record. */
+    fun snapshotRecords(): List<UserServiceRecord> {
+        synchronized(this) {
+            return ArrayList(userServiceRecords.values)
+        }
+    }
+
+    /** Finds a record by its attach token, or returns `null` if it is no longer tracked. */
+    fun findRecordByToken(token: String?): UserServiceRecord? {
+        if (token.isNullOrEmpty()) return null
+        synchronized(this) {
+            return userServiceRecords.values.firstOrNull { it.token == token }
+        }
+    }
+
+    /** UID that owns [record], captured when the record was created. */
+    fun recordUid(record: UserServiceRecord): Int = record.ownerUid
+
+    /** Whether all client access is administratively paused. */
+    fun isAccessPaused(): Boolean = accessPaused
+
+    /**
+     * Pauses or resumes client access. Pausing also tears down every tracked UserService, since
+     * a running service would otherwise keep operating after access was revoked.
+     */
+    fun updateAccessPaused(paused: Boolean) {
+        if (accessPaused == paused) return
+        accessPaused = paused
+        if (paused) {
+            removeAllUserServiceRecords()
+        }
+    }
+
+    /**
+     * Removes every tracked UserService record.
+     *
+     * This is the member implementation; [removeAllUserServices] is the historical alias.
+     */
+    fun removeAllUserServiceRecords() {
+        val records = snapshotRecords()
+        for (record in records) {
+            try {
+                record.removeSelf()
+            } catch (t: Throwable) {
+                LOGGER.w(t, "removeAllUserServiceRecords: %s", record.token)
+            }
+            LOGGER.i("Remove user service %s", record.token)
         }
     }
 
@@ -582,3 +726,19 @@ abstract class UserServiceManager {
         }
     }
 }
+
+/**
+ * Compatibility alias for the historical Shizuku UserService manager API.
+ *
+ * Declared as an extension so that existing subclasses that already expose
+ * `removeAllUserServices` keep compiling unchanged; Kotlin resolves the subclass member first.
+ */
+fun UserServiceManager.removeAllUserServices() = removeAllUserServiceRecords()
+
+/**
+ * Compatibility alias for the historical Shizuku UserService manager API.
+ *
+ * Declared as an extension so that existing subclasses that already expose `setAccessPaused`
+ * keep compiling unchanged; Kotlin resolves the subclass member first.
+ */
+fun UserServiceManager.setAccessPaused(paused: Boolean) = updateAccessPaused(paused)
