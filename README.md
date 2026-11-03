@@ -25,7 +25,7 @@ Kotlin-first IPC protocol, client SDK, dual-wire `ContentProvider`, Rust-powered
 
 ## Maven
 
-**Latest release:** [`13.2.1` on Maven Central](https://central.sonatype.com/artifact/io.github.kerneldroid/api/13.2.1)
+**Latest release:** [`13.2.1` on Maven Central](https://central.sonatype.com/artifact/io.github.kerneldroid/api/13.2.1) · [GitHub release](https://github.com/kerneldroid/nightzuku-api/releases/tag/v13.2.1) · [GitHub Packages](https://github.com/kerneldroid?tab=packages&repo_name=nightzuku-api)
 
 Published artifacts use the `io.github.kerneldroid` group on Maven Central.
 
@@ -56,6 +56,27 @@ For local development, publish the current working tree into `~/.m2`:
 ```
 
 The same coordinates then resolve from `mavenLocal()` without a Central release.
+
+### GitHub Packages
+
+The same artifacts are mirrored to GitHub Packages. The registry is
+repository-scoped and always requires authentication, even for public packages:
+
+```kotlin
+repositories {
+    maven {
+        url = uri("https://maven.pkg.github.com/kerneldroid/nightzuku-api")
+        credentials {
+            username = System.getenv("GITHUB_ACTOR") ?: "your-github-username"
+            password = System.getenv("GITHUB_TOKEN")   // needs read:packages
+        }
+    }
+}
+```
+
+Maintainer releases run `./gradlew publish` with `GITHUB_TOKEN` (the
+`Publish GitHub Packages` workflow does this automatically on release or
+manual dispatch) and need the `write:packages` permission.
 
 ## Building
 
