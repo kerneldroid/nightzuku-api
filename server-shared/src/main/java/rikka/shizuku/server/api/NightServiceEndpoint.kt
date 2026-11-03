@@ -51,8 +51,13 @@ open class NightServiceEndpoint(
         var process: Process? = null
 
         val cancelled = AtomicBoolean(false)
+        val clientDied = AtomicBoolean(false)
+        val notified = AtomicBoolean(false)
 
-        fun terminate() {
+        fun terminate(fromClientDeath: Boolean = false) {
+            if (fromClientDeath) {
+                clientDied.set(true)
+            }
             if (!cancelled.compareAndSet(false, true)) return
             val targetPid = pid
             if (targetPid > 0) {
@@ -275,7 +280,11 @@ open class NightServiceEndpoint(
                 service.enforceManagerPermission("getUidCapabilities")
                 val targetUid = data.readInt()
                 val entry = service.configManager.find(targetUid)
-                val caps = TransactGuard.effectiveCapabilities(entry, service.configManager.isAccessPaused())
+                val caps = TransactGuard.effectiveCapabilities(
+                    entry,
+                    service.configManager.isAccessPaused(),
+                    service.clientManager.isOneTimeAccessGranted(targetUid)
+                )
                 reply!!.writeNoException()
                 reply.writeInt(caps)
                 return true
@@ -376,7 +385,7 @@ open class NightServiceEndpoint(
         for ((callId, handle) in ArrayList(activeExecCalls.entries)) {
             if (handle.callingPid == pid) {
                 activeExecCalls.remove(callId, handle)
-                handle.terminate()
+                handle.terminate(fromClientDeath = true)
             }
         }
     }
@@ -555,7 +564,8 @@ open class NightServiceEndpoint(
         val isManager = service.checkCallerManagerPermission("checkPermission", callingUid, callingPid)
         val paused = service.configManager.isAccessPaused()
         val record = service.clientManager.findClient(callingUid, callingPid)
-        val allowed = isManager || (!paused && record != null && record.allowed)
+        val oneTime = service.clientManager.isOneTimeAccessGranted(callingUid)
+        val allowed = isManager || (!paused && ((record != null && record.allowed) || oneTime))
         val entry = service.configManager.find(callingUid)
         val rationale = !allowed && (entry?.isDenied() == true)
         val caps = if (isManager) {
@@ -564,7 +574,7 @@ open class NightServiceEndpoint(
             TransactGuard.effectiveCapabilities(
                 entry,
                 paused,
-                service.clientManager.isOneTimeAccessGranted(callingUid)
+                oneTime
             )
         }
 
@@ -795,13 +805,15 @@ open class NightServiceEndpoint(
         execPool.execute {
             try {
                 val out = executeCommandBounded(cmd, env, dir, timeoutMs, handle)
-                if (!handle.cancelled.get()) {
-                    notifyExecResult(callingPid, callId, out.exitCode, out.timedOut, out.stdout, out.stderr)
+                if (!handle.clientDied.get() && handle.notified.compareAndSet(false, true)) {
+                    val exitCode = if (handle.cancelled.get() && out.exitCode == 0) 137 else out.exitCode
+                    notifyExecResult(callingPid, callId, exitCode, out.timedOut, out.stdout, out.stderr)
                 }
             } catch (t: Throwable) {
-                if (!handle.cancelled.get()) {
+                if (!handle.clientDied.get() && handle.notified.compareAndSet(false, true)) {
+                    val exitCode = if (handle.cancelled.get()) 137 else -1
                     val errBytes = (t.message ?: "execAsync failed").toByteArray(StandardCharsets.UTF_8)
-                    notifyExecResult(callingPid, callId, -1, false, ByteArray(0), errBytes)
+                    notifyExecResult(callingPid, callId, exitCode, false, ByteArray(0), errBytes)
                 }
             } finally {
                 activeExecCalls.remove(callId, handle)
@@ -819,7 +831,11 @@ open class NightServiceEndpoint(
             throw SecurityException("Cannot cancel execAsync callId=$callId owned by uid=${handle.callingUid}")
         }
         activeExecCalls.remove(callId, handle)
-        handle.terminate()
+        handle.terminate(fromClientDeath = false)
+        if (handle.notified.compareAndSet(false, true)) {
+            val errBytes = "Command execution cancelled".toByteArray(StandardCharsets.UTF_8)
+            notifyExecResult(handle.callingPid, callId, 137, false, ByteArray(0), errBytes)
+        }
     }
 
     private class BoundedBuffer(private val maxBytes: Int) {

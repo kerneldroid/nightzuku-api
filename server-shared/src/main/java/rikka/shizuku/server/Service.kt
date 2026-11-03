@@ -239,6 +239,11 @@ abstract class Service<
     @Throws(RemoteException::class)
     fun transactRemote(data: Parcel, reply: Parcel?, flags: Int) {
         enforceCallingPermission("transactRemote")
+        enforceCapability(
+            "transactRemote",
+            NightProtocol.CAP_BINDER_PROXY,
+            clientManager.isOneTimeAccessGranted(Binder.getCallingUid())
+        )
 
         val targetBinder = data.readStrongBinder()
         validateRemoteTransactTarget(targetBinder)
@@ -381,6 +386,10 @@ abstract class Service<
 
         if (isAccessPausedNow()) {
             return false
+        }
+
+        if (clientManager.isOneTimeAccessGranted(callingUid)) {
+            return true
         }
 
         val clientRecord = clientManager.findClient(callingUid, callingPid)

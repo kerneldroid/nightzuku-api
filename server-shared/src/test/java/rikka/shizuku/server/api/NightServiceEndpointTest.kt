@@ -168,7 +168,7 @@ class NightServiceEndpointTest {
     }
 
     @Test
-    fun `cancelExec stops an in-flight async call without reporting a result`() {
+    fun `cancelExec stops an in-flight async call and reports cancellation exit code`() {
         host.config.allowWithFlags(CALLING_UID, ConfigManager.FLAG_ALLOWED)
         val callback = CallbackBinder()
         attach(NightProtocol.PROTOCOL_VERSION, callback).recycle()
@@ -185,7 +185,11 @@ class NightServiceEndpointTest {
             data.writeLong(CALL_ID)
         }.recycle()
 
-        assertNull(callback.execResults.poll(2, TimeUnit.SECONDS))
+        val result = callback.execResults.poll(5, TimeUnit.SECONDS)
+        assertNotNull(result)
+        assertEquals(CALL_ID, result!!.callId)
+        assertEquals(137, result.exitCode)
+        assertFalse(result.timedOut)
     }
 
     @Test
@@ -399,43 +403,6 @@ class NightServiceEndpointTest {
         override fun onTransactRish(code: Int, data: Parcel, reply: Parcel?, flags: Int): Boolean = false
     }
 
-    private class TestConfigManager : ConfigManager(), ConfigManager.ClientAccessVerifier {
-
-        private class Entry(var flagsValue: Int) : ConfigPackageEntry(), ConfigFlagsEntry {
-            override fun isAllowed(): Boolean =
-                (flagsValue and ConfigManager.FLAG_ALLOWED) != 0
-
-            override fun isDenied(): Boolean =
-                (flagsValue and ConfigManager.FLAG_DENIED) != 0
-
-            override fun capabilityFlags(): Int = flagsValue
-        }
-
-        val entries = LinkedHashMap<Int, Entry>()
-        var paused: Boolean = false
-
-        fun allowWithFlags(uid: Int, flags: Int) {
-            entries[uid] = Entry(flags)
-        }
-
-        override fun find(uid: Int): ConfigPackageEntry? = entries[uid]
-
-        override fun update(uid: Int, packages: MutableList<String>?, mask: Int, values: Int) {
-            val entry = entries.getOrPut(uid) { Entry(0) }
-            entry.flagsValue = (entry.flagsValue and mask.inv()) or (mask and values)
-        }
-
-        override fun remove(uid: Int) {
-            entries.remove(uid)
-        }
-
-        override fun isAccessPaused(): Boolean = paused
-
-        override fun verifyClientIdentity(uid: Int, packageName: String): Boolean = true
-
-        override fun recordConnection(uid: Int) = Unit
-    }
-
     private class TestUserServiceManager : UserServiceManager() {
         override fun getUserServiceStartCmd(
             record: UserServiceRecord,
@@ -447,56 +414,40 @@ class NightServiceEndpointTest {
             callingUid: Int,
             use32Bits: Boolean,
             debug: Boolean
-        ): String = ""
+        ): String = "/system/bin/true"
     }
 
-    private class CallbackBinder : Binder() {
-        data class ExecResult(
-            val callId: Long,
-            val exitCode: Int,
-            val timedOut: Boolean,
-            val stdout: ByteArray,
-            val stderr: ByteArray
-        )
+    private class TestEntry(val uid: Int, var rawFlags: Int) : ConfigPackageEntry(), ConfigFlagsEntry {
+        override fun isAllowed(): Boolean = (rawFlags and ConfigManager.FLAG_ALLOWED) != 0
 
-        val execResults = LinkedBlockingQueue<ExecResult>()
-        val permissionResults = LinkedBlockingQueue<Int>()
+        override fun isDenied(): Boolean = (rawFlags and ConfigManager.FLAG_DENIED) != 0
 
-        override fun onTransact(code: Int, data: Parcel, reply: Parcel?, flags: Int): Boolean {
-            when (code) {
-                NightProtocol.CALLBACK_ON_EXEC_RESULT -> {
-                    data.enforceInterface(NightProtocol.CALLBACK_DESCRIPTOR)
-                    execResults.put(
-                        ExecResult(
-                            callId = data.readLong(),
-                            exitCode = data.readInt(),
-                            timedOut = data.readInt() != 0,
-                            stdout = data.createByteArray() ?: ByteArray(0),
-                            stderr = data.createByteArray() ?: ByteArray(0)
-                        )
-                    )
-                    return true
-                }
-                NightProtocol.CALLBACK_ON_REQUEST_PERMISSION_RESULT -> {
-                    data.enforceInterface(NightProtocol.CALLBACK_DESCRIPTOR)
-                    permissionResults.put(data.readInt())
-                    return true
-                }
-                NightProtocol.CALLBACK_ON_PERMISSION_CHANGED -> {
-                    data.enforceInterface(NightProtocol.CALLBACK_DESCRIPTOR)
-                    return true
-                }
-            }
-            return super.onTransact(code, data, reply, flags)
+        override fun capabilityFlags(): Int = rawFlags
+    }
+
+    private class TestConfigManager : ConfigManager() {
+        private val entries = HashMap<Int, TestEntry>()
+        var paused: Boolean = false
+
+        fun allowWithFlags(uid: Int, flags: Int) {
+            entries[uid] = TestEntry(uid, flags)
         }
-    }
 
-    private class RecordingBinder : Binder() {
-        var lastCode: Int = -1
+        override fun find(uid: Int): ConfigPackageEntry? = entries[uid]
 
-        override fun onTransact(code: Int, data: Parcel, reply: Parcel?, flags: Int): Boolean {
-            lastCode = code
-            return true
+        override fun update(uid: Int, packages: MutableList<String>?, mask: Int, values: Int) {
+            val current = entries[uid]?.rawFlags ?: 0
+            entries[uid] = TestEntry(uid, (current and mask.inv()) or (values and mask))
+        }
+
+        override fun remove(uid: Int) {
+            entries.remove(uid)
+        }
+
+        override fun isAccessPaused(): Boolean = paused
+
+        override fun setAccessPaused(paused: Boolean) {
+            this.paused = paused
         }
     }
 
@@ -520,21 +471,59 @@ class NightServiceEndpointTest {
         override fun getExitFd(): ParcelFileDescriptor? = null
     }
 
+    private data class ExecCallback(
+        val callId: Long,
+        val exitCode: Int,
+        val timedOut: Boolean,
+        val stdout: ByteArray,
+        val stderr: ByteArray
+    )
+
+    private class CallbackBinder : Binder() {
+        val execResults = LinkedBlockingQueue<ExecCallback>()
+
+        override fun onTransact(code: Int, data: Parcel, reply: Parcel?, flags: Int): Boolean {
+            if (code == NightProtocol.CALLBACK_ON_EXEC_RESULT) {
+                data.enforceInterface(NightProtocol.CALLBACK_DESCRIPTOR)
+                execResults.add(
+                    ExecCallback(
+                        callId = data.readLong(),
+                        exitCode = data.readInt(),
+                        timedOut = data.readInt() != 0,
+                        stdout = data.createByteArray() ?: ByteArray(0),
+                        stderr = data.createByteArray() ?: ByteArray(0)
+                    )
+                )
+                return true
+            }
+            return super.onTransact(code, data, reply, flags)
+        }
+    }
+
+    private class RecordingBinder : Binder() {
+        var lastCode: Int = -1
+
+        override fun onTransact(code: Int, data: Parcel, reply: Parcel?, flags: Int): Boolean {
+            lastCode = code
+            return true
+        }
+    }
+
     companion object {
-        private const val CALLING_UID = 10_234
-        private const val CALLING_PID = 4_242
+        private const val NO_EXCEPTION = 0
+        private const val CALLING_UID = 10123
+        private const val CALLING_PID = 4321
         private const val PACKAGE_NAME = "com.example.client"
         private const val OTHER_PACKAGE = "com.example.other"
-        private const val CALL_ID = 41L
-        private const val TARGET_CODE = 42
-        private const val UNKNOWN_CODE = NightProtocol.TRANSACTION_CANCEL_EXEC + 1_000
-        private const val NO_EXCEPTION = 0
+        private const val CALL_ID = 77L
+        private const val TARGET_CODE = IBinder.FIRST_CALL_TRANSACTION + 5
+        private const val UNKNOWN_CODE = IBinder.FIRST_CALL_TRANSACTION + 999
 
         private val SHELL_WITH_OUTPUT = arrayOf(
             "/bin/sh",
             "-c",
-            "printf stdout; printf stderr 1>&2; exit 3"
+            "printf stdout; printf stderr >&2; exit 3"
         )
-        private val SLEEPING_SHELL = arrayOf("/bin/sh", "-c", "sleep 30")
+        private val SLEEPING_SHELL = arrayOf("/bin/sh", "-c", "sleep 5")
     }
 }

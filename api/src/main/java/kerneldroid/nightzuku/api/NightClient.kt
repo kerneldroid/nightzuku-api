@@ -689,16 +689,28 @@ object NightClient {
 
     @JvmStatic
     fun cancelExecAsync(callId: Long) {
-        pendingExecCalls.remove(callId)
-        val current = session.get()?.binder ?: return
-        val data = Parcel.obtain()
-        try {
-            data.writeInterfaceToken(NightProtocol.DESCRIPTOR)
-            data.writeLong(callId)
-            current.transact(NightProtocol.TRANSACTION_CANCEL_EXEC, data, null, IBinder.FLAG_ONEWAY)
-        } catch (_: Throwable) {
-        } finally {
-            data.recycle()
+        val current = session.get()?.binder
+        if (current != null) {
+            val data = Parcel.obtain()
+            try {
+                data.writeInterfaceToken(NightProtocol.DESCRIPTOR)
+                data.writeLong(callId)
+                current.transact(NightProtocol.TRANSACTION_CANCEL_EXEC, data, null, IBinder.FLAG_ONEWAY)
+            } catch (_: Throwable) {
+            } finally {
+                data.recycle()
+            }
+        }
+        val pending = pendingExecCalls.remove(callId)
+        if (pending != null && !pending.isDone) {
+            pending.complete(
+                ExecResult(
+                    exitCode = 137,
+                    timedOut = false,
+                    stdout = ByteArray(0),
+                    stderr = "Command execution cancelled".toByteArray(StandardCharsets.UTF_8)
+                )
+            )
         }
     }
 

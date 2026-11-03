@@ -107,8 +107,10 @@ open class NightzukuServerService :
             val oneTimeGranted = clientManager.isOneTimeAccessGranted(callingUid)
             if (configManager.isAccessPaused()) {
                 record.allowed = false
-            } else if (!oneTimeGranted &&
-                record.allowed &&
+            } else if (oneTimeGranted) {
+                record.allowed = true
+                configManager.recordConnection(callingUid)
+            } else if (record.allowed &&
                 !configManager.verifyClientIdentity(callingUid, packageName)
             ) {
                 record.allowed = false
@@ -131,13 +133,14 @@ open class NightzukuServerService :
     override fun notifyCapabilitiesUpdated(uid: Int) {
         val paused = configManager.isAccessPaused()
         val entry = configManager.find(uid)
-        val allowed = !paused && entry?.isAllowed() == true
-        val rationale = entry?.isDenied() == true
+        val oneTime = clientManager.isOneTimeAccessGranted(uid)
+        val allowed = !paused && (entry?.isAllowed() == true || oneTime)
+        val rationale = !oneTime && (entry?.isDenied() == true)
         val capabilities = if (allowed) {
             TransactGuard.effectiveCapabilities(
                 entry,
                 paused,
-                clientManager.isOneTimeAccessGranted(uid)
+                oneTime
             )
         } else {
             0
@@ -161,10 +164,11 @@ open class NightzukuServerService :
 
         for (record in clientManager.allClients()) {
             val entry = configManager.find(record.uid)
-            val allowed = !paused && entry?.isAllowed() == true
+            val oneTime = clientManager.isOneTimeAccessGranted(record.uid)
+            val allowed = !paused && (entry?.isAllowed() == true || oneTime)
             record.allowed = allowed
             val capabilities = if (allowed) {
-                TransactGuard.effectiveCapabilities(entry, paused)
+                TransactGuard.effectiveCapabilities(entry, paused, oneTime)
             } else {
                 0
             }
@@ -172,7 +176,7 @@ open class NightzukuServerService :
                 record.uid,
                 record.pid,
                 allowed,
-                entry?.isDenied() == true,
+                !oneTime && (entry?.isDenied() == true),
                 capabilities
             )
         }
