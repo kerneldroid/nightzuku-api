@@ -162,7 +162,7 @@ open class NightServiceEndpoint(
     }
 
     @Throws(RemoteException::class)
-    override fun onTransact(code: Int, data: Parcel, reply: Parcel?, flags: Int): Boolean {
+    public override fun onTransact(code: Int, data: Parcel, reply: Parcel?, flags: Int): Boolean {
         when (code) {
             INTERFACE_TRANSACTION -> {
                 reply?.writeString(NightProtocol.DESCRIPTOR)

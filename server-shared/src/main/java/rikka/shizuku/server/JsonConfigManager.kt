@@ -31,7 +31,7 @@ import rikka.shizuku.server.util.UserHandleCompat
  * certificates. All mutations are serialized on an internal monitor and every successful mutation
  * is written through [AtomicFile], so a crash during a write can never leave a truncated config.
  */
-class JsonConfigManager @JvmOverloads constructor(
+open class JsonConfigManager @JvmOverloads constructor(
     val configFile: File,
     val apiPermission: String,
     private val identityResolver: ClientIdentityResolver = AndroidClientIdentityResolver(),
