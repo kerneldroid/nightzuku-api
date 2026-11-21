@@ -71,13 +71,24 @@ object NightProtocol {
     const val TRANSACTION_NEW_PROCESS = IBinder.FIRST_CALL_TRANSACTION + 16
     const val TRANSACTION_EXEC_ASYNC = IBinder.FIRST_CALL_TRANSACTION + 17
     const val TRANSACTION_CANCEL_EXEC = IBinder.FIRST_CALL_TRANSACTION + 18
+    const val TRANSACTION_EXEC_FAST_FD = IBinder.FIRST_CALL_TRANSACTION + 19
+    const val TRANSACTION_EXEC_ASYNC_FD = IBinder.FIRST_CALL_TRANSACTION + 20
+    const val TRANSACTION_NEW_PROCESS_FD = IBinder.FIRST_CALL_TRANSACTION + 21
 
     // INightCallback transaction codes
     const val CALLBACK_ON_PERMISSION_CHANGED = IBinder.FIRST_CALL_TRANSACTION + 1
     const val CALLBACK_ON_REQUEST_PERMISSION_RESULT = IBinder.FIRST_CALL_TRANSACTION + 2
     const val CALLBACK_ON_EXEC_RESULT = IBinder.FIRST_CALL_TRANSACTION + 3
 
-    // Bounds for fast one-shot command execution
+    // Bounds for fast one-shot and extended FD-backed command execution
     const val EXEC_FAST_MAX_OUTPUT_BYTES = 256 * 1024
     const val EXEC_FAST_DEFAULT_TIMEOUT_MS = 30_000L
+    const val EXEC_INLINE_PARCEL_THRESHOLD_BYTES = 256 * 1024
+    const val EXEC_MAX_CMDLINE_BYTES = 4 * 1024 * 1024
+
+    // Server diagnostics capability keys for extended app_process / shell command lines
+    const val DIAG_KEY_SUPPORTS_EXTENDED_CMDLINE = "supportsExtendedAppProcessCmdline"
+    const val DIAG_KEY_MAX_CMDLINE_BYTES = "maxAppProcessCmdlineBytes"
+    const val DIAG_KEY_SAFE_INLINE_ARG_BYTES = "safeInlineArgBytes"
+    const val DIAG_KEY_EXTENDED_CMDLINE_TRANSPORT = "extendedCmdlineTransport"
 }

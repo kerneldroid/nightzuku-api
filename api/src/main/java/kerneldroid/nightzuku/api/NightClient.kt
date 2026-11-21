@@ -527,6 +527,32 @@ object NightClient {
     @JvmStatic
     fun hasCapability(capabilityFlag: Int): Boolean = ((session.get()?.capabilities ?: 0) and capabilityFlag) != 0
 
+    /**
+     * Queries the connected server's advertised maximum `app_process` / shell command-line payload
+     * size in bytes via `getServerDiagnostics`, or returns `0` if not advertised.
+     */
+    @JvmStatic
+    fun getMaxAppProcessCmdlineBytes(): Int {
+        val current = session.get()?.binder ?: return 0
+        if (!current.pingBinder()) return 0
+        val data = Parcel.obtain()
+        val reply = Parcel.obtain()
+        return try {
+            data.writeInterfaceToken(NightProtocol.DESCRIPTOR)
+            if (!current.transact(NightProtocol.TRANSACTION_GET_SERVER_DIAGNOSTICS, data, reply, 0)) {
+                return 0
+            }
+            reply.readException()
+            val bundle = reply.readBundle(NightClient::class.java.classLoader) ?: return 0
+            bundle.getInt(NightProtocol.DIAG_KEY_MAX_CMDLINE_BYTES, 0)
+        } catch (_: Throwable) {
+            0
+        } finally {
+            reply.recycle()
+            data.recycle()
+        }
+    }
+
     @JvmStatic
     fun checkSelfPermission(): Int {
         val currentSession = session.get() ?: return PackageManager.PERMISSION_DENIED
@@ -595,15 +621,25 @@ object NightClient {
         timeoutMs: Long = NightProtocol.EXEC_FAST_DEFAULT_TIMEOUT_MS
     ): ExecResult {
         val current = requireBinder()
+        val useFdTransport = LargeExecCodec.estimateCommandBytes(cmd, env, dir) >
+            NightProtocol.EXEC_INLINE_PARCEL_THRESHOLD_BYTES
         val data = Parcel.obtain()
         val reply = Parcel.obtain()
+        var cmdPfd: ParcelFileDescriptor? = null
         return try {
             data.writeInterfaceToken(NightProtocol.DESCRIPTOR)
-            data.writeStringArray(cmd)
-            data.writeStringArray(env)
-            data.writeString(dir)
-            data.writeLong(timeoutMs)
-            current.transact(NightProtocol.TRANSACTION_EXEC_FAST, data, reply, 0)
+            if (useFdTransport) {
+                cmdPfd = LargeExecCodec.writeToPipe(cmd, env, dir)
+                cmdPfd.writeToParcel(data, 0)
+                data.writeLong(timeoutMs)
+                current.transact(NightProtocol.TRANSACTION_EXEC_FAST_FD, data, reply, 0)
+            } else {
+                data.writeStringArray(cmd)
+                data.writeStringArray(env)
+                data.writeString(dir)
+                data.writeLong(timeoutMs)
+                current.transact(NightProtocol.TRANSACTION_EXEC_FAST, data, reply, 0)
+            }
             reply.readException()
             val exitCode = reply.readInt()
             val timedOut = reply.readInt() != 0
@@ -613,6 +649,7 @@ object NightClient {
         } catch (e: RemoteException) {
             throw RuntimeException(e)
         } finally {
+            runCatching { cmdPfd?.close() }
             reply.recycle()
             data.recycle()
         }
@@ -636,17 +673,27 @@ object NightClient {
         val future = ExecCallFuture(callId)
         pendingExecCalls[callId] = future
 
+        val useFdTransport = LargeExecCodec.estimateCommandBytes(cmd, env, dir) >
+            NightProtocol.EXEC_INLINE_PARCEL_THRESHOLD_BYTES
         val data = Parcel.obtain()
+        var cmdPfd: ParcelFileDescriptor? = null
         try {
             data.writeInterfaceToken(NightProtocol.DESCRIPTOR)
             data.writeLong(callId)
-            data.writeStringArray(cmd)
-            data.writeStringArray(env)
-            data.writeString(dir)
+            val txCode = if (useFdTransport) {
+                cmdPfd = LargeExecCodec.writeToPipe(cmd, env, dir)
+                cmdPfd.writeToParcel(data, 0)
+                NightProtocol.TRANSACTION_EXEC_ASYNC_FD
+            } else {
+                data.writeStringArray(cmd)
+                data.writeStringArray(env)
+                data.writeString(dir)
+                NightProtocol.TRANSACTION_EXEC_ASYNC
+            }
             data.writeLong(timeoutMs)
             // Oneway binder transactions do not carry the sender PID, so include it explicitly.
             data.writeInt(Process.myPid())
-            val sent = current.transact(NightProtocol.TRANSACTION_EXEC_ASYNC, data, null, IBinder.FLAG_ONEWAY)
+            val sent = current.transact(txCode, data, null, IBinder.FLAG_ONEWAY)
             if (!sent) {
                 pendingExecCalls.remove(callId)
                 future.completeExceptionally(RemoteException("TRANSACTION_EXEC_ASYNC returned false"))
@@ -655,6 +702,7 @@ object NightClient {
             pendingExecCalls.remove(callId)
             future.completeExceptionally(t)
         } finally {
+            runCatching { cmdPfd?.close() }
             data.recycle()
         }
         return future
@@ -727,14 +775,24 @@ object NightClient {
     ): ShizukuRemoteProcess {
         val current = session.get()?.binder
         if (current != null && current.pingBinder()) {
+            val useFdTransport = LargeExecCodec.estimateCommandBytes(cmd, env, dir) >
+                NightProtocol.EXEC_INLINE_PARCEL_THRESHOLD_BYTES
             val data = Parcel.obtain()
             val reply = Parcel.obtain()
+            var cmdPfd: ParcelFileDescriptor? = null
             try {
                 data.writeInterfaceToken(NightProtocol.DESCRIPTOR)
-                data.writeStringArray(cmd)
-                data.writeStringArray(env)
-                data.writeString(dir)
-                if (current.transact(NightProtocol.TRANSACTION_NEW_PROCESS, data, reply, 0)) {
+                val txCode = if (useFdTransport) {
+                    cmdPfd = LargeExecCodec.writeToPipe(cmd, env, dir)
+                    cmdPfd.writeToParcel(data, 0)
+                    NightProtocol.TRANSACTION_NEW_PROCESS_FD
+                } else {
+                    data.writeStringArray(cmd)
+                    data.writeStringArray(env)
+                    data.writeString(dir)
+                    NightProtocol.TRANSACTION_NEW_PROCESS
+                }
+                if (current.transact(txCode, data, reply, 0)) {
                     reply.readException()
                     val remoteBinder = reply.readStrongBinder()
                     val remoteProcess = IRemoteProcess.Stub.asInterface(remoteBinder)
@@ -749,6 +807,7 @@ object NightClient {
             } catch (e: RemoteException) {
                 throw RuntimeException(e)
             } finally {
+                runCatching { cmdPfd?.close() }
                 reply.recycle()
                 data.recycle()
             }

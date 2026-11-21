@@ -16,6 +16,7 @@ import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
+import kerneldroid.nightzuku.api.LargeExecCodec
 import kerneldroid.nightzuku.api.NightProtocol
 import moe.shizuku.server.IShizukuApplication
 import moe.shizuku.server.IShizukuServiceConnection
@@ -191,9 +192,19 @@ open class NightServiceEndpoint(
                 handleExecFast(data, reply!!)
                 return true
             }
+            NightProtocol.TRANSACTION_EXEC_FAST_FD -> {
+                data.enforceInterface(NightProtocol.DESCRIPTOR)
+                handleExecFastFd(data, reply!!)
+                return true
+            }
             NightProtocol.TRANSACTION_EXEC_ASYNC -> {
                 data.enforceInterface(NightProtocol.DESCRIPTOR)
                 handleExecAsync(data)
+                return true
+            }
+            NightProtocol.TRANSACTION_EXEC_ASYNC_FD -> {
+                data.enforceInterface(NightProtocol.DESCRIPTOR)
+                handleExecAsyncFd(data)
                 return true
             }
             NightProtocol.TRANSACTION_CANCEL_EXEC -> {
@@ -330,6 +341,10 @@ open class NightServiceEndpoint(
                     putBoolean("accessPaused", service.configManager.isAccessPaused())
                     putBoolean("nightDogEnabled", service.getNightDogEnabled(false))
                     putInt("activeClientsCount", service.clientManager.allClients().size)
+                    putBoolean(NightProtocol.DIAG_KEY_SUPPORTS_EXTENDED_CMDLINE, true)
+                    putInt(NightProtocol.DIAG_KEY_MAX_CMDLINE_BYTES, NightProtocol.EXEC_MAX_CMDLINE_BYTES)
+                    putInt(NightProtocol.DIAG_KEY_SAFE_INLINE_ARG_BYTES, NightProtocol.EXEC_INLINE_PARCEL_THRESHOLD_BYTES)
+                    putString(NightProtocol.DIAG_KEY_EXTENDED_CMDLINE_TRANSPORT, "fd-pipe-v1")
                 }
                 reply!!.writeNoException()
                 reply.writeBundle(diagnostics)
@@ -363,18 +378,14 @@ open class NightServiceEndpoint(
                 }
                 val env = data.createStringArray()
                 val dir = data.readString()
-                val proc = service.newProcess(cmd, env, dir)
-                val exitFd = runCatching { proc.exitFd }.getOrNull()
-                reply!!.writeNoException()
-                reply.writeStrongBinder(proc.asBinder())
-                if (exitFd != null) {
-                    reply.writeInt(1)
-                    exitFd.use {
-                        it.writeToParcel(reply, Parcelable.PARCELABLE_WRITE_RETURN_VALUE)
-                    }
-                } else {
-                    reply.writeInt(0)
-                }
+                replyNewProcess(cmd, env, dir, reply!!)
+                return true
+            }
+            NightProtocol.TRANSACTION_NEW_PROCESS_FD -> {
+                data.enforceInterface(NightProtocol.DESCRIPTOR)
+                val pfd = ParcelFileDescriptor.CREATOR.createFromParcel(data)
+                val decoded = LargeExecCodec.decodeFromParcelFileDescriptor(pfd)
+                replyNewProcess(decoded.cmd, decoded.env, decoded.dir, reply!!)
                 return true
             }
         }
@@ -746,6 +757,101 @@ open class NightServiceEndpoint(
             stdout = stdoutBuffer.toByteArray(),
             stderr = stderrBuffer.toByteArray()
         )
+    }
+
+    private fun replyNewProcess(
+        cmd: Array<String>,
+        env: Array<String>?,
+        dir: String?,
+        reply: Parcel
+    ) {
+        val proc = service.newProcess(cmd, env, dir)
+        val exitFd = runCatching { proc.exitFd }.getOrNull()
+        reply.writeNoException()
+        reply.writeStrongBinder(proc.asBinder())
+        if (exitFd != null) {
+            reply.writeInt(1)
+            exitFd.use {
+                it.writeToParcel(reply, Parcelable.PARCELABLE_WRITE_RETURN_VALUE)
+            }
+        } else {
+            reply.writeInt(0)
+        }
+    }
+
+    private fun handleExecFastFd(data: Parcel, reply: Parcel) {
+        val callingUid = Binder.getCallingUid()
+        val callingPid = Binder.getCallingPid()
+        service.enforceCallingPermission("execFast")
+        TransactGuard.enforceCapability(
+            service.configManager,
+            callingUid,
+            service.checkCallerManagerPermission("execFast", callingUid, callingPid),
+            NightProtocol.CAP_SHELL_EXEC,
+            "execFast",
+            service.clientManager.isOneTimeAccessGranted(callingUid)
+        )
+
+        val pfd = ParcelFileDescriptor.CREATOR.createFromParcel(data)
+        val timeoutMs = data.readLong().coerceIn(100L, 300_000L)
+        val decoded = LargeExecCodec.decodeFromParcelFileDescriptor(pfd)
+        val out = executeCommandBounded(decoded.cmd, decoded.env, decoded.dir, timeoutMs)
+
+        reply.writeNoException()
+        reply.writeInt(out.exitCode)
+        reply.writeInt(if (out.timedOut) 1 else 0)
+        reply.writeByteArray(out.stdout)
+        reply.writeByteArray(out.stderr)
+    }
+
+    private fun handleExecAsyncFd(data: Parcel) {
+        val callingUid = Binder.getCallingUid()
+        val callId = data.readLong()
+        val pfd = ParcelFileDescriptor.CREATOR.createFromParcel(data)
+        val timeoutMs = data.readLong().coerceIn(100L, 300_000L)
+        val reportedPid = if (data.dataAvail() >= 4) data.readInt() else 0
+        val callingPid = resolveOnewayCallingPid(reportedPid, callingUid)
+
+        try {
+            service.enforceCallingPermission("execAsync", callingUid, callingPid)
+            TransactGuard.enforceCapability(
+                service.configManager,
+                callingUid,
+                service.checkCallerManagerPermission("execAsync", callingUid, callingPid),
+                NightProtocol.CAP_SHELL_EXEC,
+                "execAsync",
+                service.clientManager.isOneTimeAccessGranted(callingUid)
+            )
+        } catch (t: Throwable) {
+            runCatching { pfd.close() }
+            val errBytes = (t.message ?: "execAsync rejected").toByteArray(StandardCharsets.UTF_8)
+            notifyExecResult(callingPid, callId, -1, false, ByteArray(0), errBytes)
+            return
+        }
+
+        val callKey = ExecCallKey(callingUid, callingPid, callId)
+        val handle = ActiveExecHandle(callId, callingUid, callingPid)
+        activeExecCalls[callKey] = handle
+
+        execPool.execute {
+            try {
+                val decoded = LargeExecCodec.decodeFromParcelFileDescriptor(pfd)
+                val out = executeCommandBounded(decoded.cmd, decoded.env, decoded.dir, timeoutMs, handle)
+                if (!handle.clientDied.get() && handle.notified.compareAndSet(false, true)) {
+                    val exitCode = if (handle.cancelled.get() && out.exitCode == 0) 137 else out.exitCode
+                    notifyExecResult(callingPid, callId, exitCode, out.timedOut, out.stdout, out.stderr)
+                }
+            } catch (t: Throwable) {
+                runCatching { pfd.close() }
+                if (!handle.clientDied.get() && handle.notified.compareAndSet(false, true)) {
+                    val exitCode = if (handle.cancelled.get()) 137 else -1
+                    val errBytes = (t.message ?: "execAsync failed").toByteArray(StandardCharsets.UTF_8)
+                    notifyExecResult(callingPid, callId, exitCode, false, ByteArray(0), errBytes)
+                }
+            } finally {
+                activeExecCalls.remove(callKey, handle)
+            }
+        }
     }
 
     private fun handleExecFast(data: Parcel, reply: Parcel) {
